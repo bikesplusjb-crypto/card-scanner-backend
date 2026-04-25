@@ -1,0 +1,61 @@
+import express from "express";
+import multer from "multer";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
+import cors from "cors";
+import FormData from "form-data";
+
+dotenv.config();
+
+const app = express();
+const upload = multer();
+
+app.use(cors());
+
+app.post("/scan-card", upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No image uploaded" });
+    }
+
+    const formData = new FormData();
+    formData.append("image", req.file.buffer, {
+      filename: req.file.originalname,
+      contentType: req.file.mimetype
+    });
+
+    const csRes = await fetch("https://api.cardsight.ai/v1/identify/card", {
+      method: "POST",
+      headers: {
+        "X-API-Key": process.env.CARDSIGHT_API_KEY
+      },
+      body: formData
+    });
+
+    const csData = await csRes.json();
+    const detection = csData?.data?.detections?.[0];
+
+    if (!detection) {
+      return res.json({ success: false });
+    }
+
+    const card = detection.card;
+
+    res.json({
+      success: true,
+      name: card?.name,
+      year: card?.year,
+      set: card?.releaseName,
+      brand: card?.manufacturer,
+      confidence: detection.confidence,
+      ebay: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(card?.name)}&LH_Sold=1&LH_Complete=1`
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+app.listen(process.env.PORT || 4000, () => {
+  console.log("Server running");
+});
