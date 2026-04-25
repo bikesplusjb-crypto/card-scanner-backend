@@ -19,13 +19,13 @@ app.get("/", (req, res) => {
 app.post("/scan-card", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: "No image uploaded" });
+      return res.status(400).json({ success: false, error: "No image uploaded" });
     }
 
     const formData = new FormData();
     formData.append("image", req.file.buffer, {
-      filename: req.file.originalname,
-      contentType: req.file.mimetype
+      filename: req.file.originalname || "card.jpg",
+      contentType: req.file.mimetype || "image/jpeg"
     });
 
     const csRes = await fetch("https://api.cardsight.ai/v1/identify/card", {
@@ -36,46 +36,77 @@ app.post("/scan-card", upload.single("image"), async (req, res) => {
       body: formData
     });
 
-    if (!csRes.ok) {
-      const text = await csRes.text();
+    const text = await csRes.text();
+
+    let csData;
+    try {
+      csData = JSON.parse(text);
+    } catch {
       return res.status(502).json({
-        error: "CardSight error",
-        details: text
+        success: false,
+        error: "CardSight returned non-JSON response",
+        status: csRes.status,
+        raw: text
       });
     }
 
-    const csData = await csRes.json();
-    const detection = csData?.data?.detections?.[0];
+    if (!csRes.ok) {
+      return res.status(502).json({
+        success: false,
+        error: "CardSight API error",
+        status: csRes.status,
+        raw: csData
+      });
+    }
+
+    const detection =
+      csData?.data?.detections?.[0] ||
+      csData?.detections?.[0] ||
+      csData?.results?.[0] ||
+      csData?.cards?.[0] ||
+      null;
 
     if (!detection) {
       return res.json({
         success: false,
-        message: "No card detected"
+        message: "No card detected",
+        raw: csData
       });
     }
 
-    const card = detection.card || {};
+    const card = detection.card || detection;
+
+    const cardName =
+      card.name ||
+      card.title ||
+      card.player ||
+      "Card identified";
 
     res.json({
       success: true,
-      name: card.name || "Unknown card",
+      name: cardName,
       year: card.year || "",
-      set: card.releaseName || "",
-      brand: card.manufacturer || "",
-      confidence: detection.confidence || 0,
+      brand: card.manufacturer || card.brand || "",
+      set: card.releaseName || card.set || card.setName || "",
+      confidence: detection.confidence || detection.score || 0,
       ebay:
         "https://www.ebay.com/sch/i.html?_nkw=" +
-        encodeURIComponent(card.name || "baseball card") +
-        "&LH_Sold=1&LH_Complete=1"
+        encodeURIComponent(cardName) +
+        "&LH_Sold=1&LH_Complete=1&_sop=13",
+      raw: csData
     });
+
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Scan failed" });
+    res.status(500).json({
+      success: false,
+      error: "Scan failed",
+      details: err.message
+    });
   }
 });
 
-const port = process.env.PORT || 4000;
-
+const port = process.env.PORT || 10000;
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
