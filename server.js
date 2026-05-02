@@ -9,15 +9,15 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// TEST ROUTE
+// ROOT TEST
 app.get("/", (req, res) => {
   res.send("AI Scanner Live ✅");
 });
 
-// TEST OPENAI ROUTE
+// OPENAI TEST
 app.get("/test-openai", async (req, res) => {
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
+    const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -29,21 +29,20 @@ app.get("/test-openai", async (req, res) => {
       })
     });
 
-    const data = await response.json();
+    const data = await r.json();
     res.json(data);
-  } catch (err) {
-    res.json({ error: err.message });
+  } catch (e) {
+    res.json({ error: e.message });
   }
 });
 
-// SCAN ROUTE
+// MAIN SCAN
 app.post("/scan-card", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) {
       return res.json({ success: false, error: "No image uploaded" });
     }
 
-    // SEND IMAGE TO OPENAI
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -58,7 +57,7 @@ app.post("/scan-card", upload.single("image"), async (req, res) => {
             content: [
               {
                 type: "input_text",
-                text: "Identify this sports or Pokémon card. Return name only."
+                text: "Identify this trading card (sports or Pokémon). Return only the card name."
               },
               {
                 type: "input_image",
@@ -72,16 +71,16 @@ app.post("/scan-card", upload.single("image"), async (req, res) => {
 
     const data = await response.json();
 
-    const text =
+    const cardName =
       data.output?.[0]?.content?.[0]?.text ||
       "Unknown card";
 
     res.json({
       success: true,
-      name: text,
+      name: cardName,
       ebay:
         "https://www.ebay.com/sch/i.html?_nkw=" +
-        encodeURIComponent(text)
+        encodeURIComponent(cardName)
     });
 
   } catch (err) {
@@ -94,6 +93,7 @@ app.post("/scan-card", upload.single("image"), async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
+
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);
 });
