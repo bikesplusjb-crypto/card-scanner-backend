@@ -2,22 +2,54 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const fetch = require("node-fetch");
-const FormData = require("form-data");
 
 const app = express();
+
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 }
+});
 
-/* ROOT TEST */
+const PORT = process.env.PORT || 10000;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
 app.get("/", (req, res) => {
   res.send("AI Scanner Live ✅");
 });
 
-/* IMAGE SCAN ROUTE */
+app.get("/test-openai", async (req, res) => {
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        input: "Say scanner ready"
+      })
+    });
+
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.post("/scan-card", upload.single("image"), async (req, res) => {
   try {
+    if (!OPENAI_API_KEY) {
+      return res.json({
+        success: false,
+        error: "Missing OPENAI_API_KEY in Render"
+      });
+    }
+
     if (!req.file) {
       return res.json({
         success: false,
@@ -25,72 +57,91 @@ app.post("/scan-card", upload.single("image"), async (req, res) => {
       });
     }
 
-    const formData = new FormData();
-    formData.append("image", req.file.buffer, {
-      filename: req.file.originalname || "card.jpg",
-      contentType: req.file.mimetype || "image/jpeg"
-    });
+    const mimeType = req.file.mimetype || "image/jpeg";
+    const base64Image = req.file.buffer.toString("base64");
+    const imageDataUrl = `data:${mimeType};base64,${base64Image}`;
 
-    // ⚠️ Replace with YOUR actual Card API if needed
-    const apiRes = await fetch("https://api.cardsight.ai/v1/identify/card", {
+    const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
-      body: formData
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        input: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text:
+                  "Identify this trading card. It may be a sports card, baseball card, basketball card, football card, Pokemon card, or collectible card. Return ONLY valid JSON with these fields: cardName, player, year, brand, set, cardNumber, confidence, searchQuery. If unsure, make the best eBay search query."
+              },
+              {
+                type: "input_image",
+                image_url: imageDataUrl
+              }
+            ]
+          }
+        ]
+      })
     });
 
-    const text = await apiRes.text();
+    const data = await response.json();
 
-    let data;
+    if (!response.ok) {
+      return res.json({
+        success: false,
+        error: "OpenAI scan failed",
+        details: data
+      });
+    }
+
+    let text =
+      data.output?.[0]?.content?.[0]?.text ||
+      data.output_text ||
+      "";
+
+    let parsed = {};
+
     try {
-      data = JSON.parse(text);
+      parsed = JSON.parse(text);
     } catch (e) {
-      return res.json({
-        success: false,
-        error: "API did not return JSON",
-        raw: text
-      });
+      parsed = {
+        cardName: text || "Unknown Card",
+        searchQuery: text || "Unknown trading card",
+        confidence: "low"
+      };
     }
 
-    const detection =
-      data?.data?.detections?.[0] ||
-      data?.detections?.[0] ||
-      data?.results?.[0] ||
-      data?.cards?.[0] ||
-      null;
+    const name =
+      parsed.searchQuery ||
+      parsed.cardName ||
+      [parsed.year, parsed.brand, parsed.player, parsed.set, parsed.cardNumber]
+        .filter(Boolean)
+        .join(" ") ||
+      "Unknown trading card";
 
-    if (!detection) {
-      return res.json({
-        success: false,
-        error: "No card detected",
-        raw: data
-      });
-    }
-
-    const card = detection.card || detection;
-
-    const cardName =
-      card.name ||
-      card.title ||
-      card.player ||
-      "Card identified";
+    const ebayUrl =
+      "https://www.ebay.com/sch/i.html?_nkw=" +
+      encodeURIComponent(name) +
+      "&LH_Sold=1&LH_Complete=1";
 
     res.json({
       success: true,
-      name: cardName,
-      year: card.year || "",
-      brand: card.manufacturer || card.brand || "",
-      set: card.releaseName || card.set || card.setName || "",
-      confidence: detection.confidence || detection.score || 0,
-
-      ebayUrl:
-        "https://www.ebay.com/sch/i.html?_nkw=" +
-        encodeURIComponent(cardName) +
-        "&LH_Sold=1&LH_Complete=1",
-
-      raw: data
+      name,
+      cardName: parsed.cardName || name,
+      player: parsed.player || "",
+      year: parsed.year || "",
+      brand: parsed.brand || "",
+      set: parsed.set || "",
+      cardNumber: parsed.cardNumber || "",
+      confidence: parsed.confidence || "medium",
+      ebayUrl,
+      raw: parsed
     });
-
   } catch (err) {
-    console.error(err);
     res.json({
       success: false,
       error: "Scan failed",
@@ -99,9 +150,6 @@ app.post("/scan-card", upload.single("image"), async (req, res) => {
   }
 });
 
-/* PORT FIX (IMPORTANT) */
-const port = process.env.PORT || 10000;
-
-app.listen(port, () => {
-  console.log("Server running on port " + port);
+app.listen(PORT, () => {
+  console.log("Server running on port " + PORT);
 });
