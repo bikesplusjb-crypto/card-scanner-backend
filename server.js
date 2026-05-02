@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const fetch = require("node-fetch");
+const FormData = require("form-data");
 
 const app = express();
 app.use(cors());
@@ -9,81 +10,87 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// ROOT TEST
+/* ROOT TEST */
 app.get("/", (req, res) => {
   res.send("AI Scanner Live ✅");
 });
 
-// OPENAI TEST
-app.get("/test-openai", async (req, res) => {
-  try {
-    const r = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: "gpt-5.3",
-        input: "Say hello"
-      })
-    });
-
-    const data = await r.json();
-    res.json(data);
-  } catch (e) {
-    res.json({ error: e.message });
-  }
-});
-
-// MAIN SCAN
+/* IMAGE SCAN ROUTE */
 app.post("/scan-card", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) {
-      return res.json({ success: false, error: "No image uploaded" });
+      return res.json({
+        success: false,
+        error: "No image uploaded"
+      });
     }
 
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: "gpt-5.3",
-        input: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: "Identify this trading card (sports or Pokémon). Return only the card name."
-              },
-              {
-                type: "input_image",
-                image_base64: req.file.buffer.toString("base64")
-              }
-            ]
-          }
-        ]
-      })
+    const formData = new FormData();
+    formData.append("image", req.file.buffer, {
+      filename: req.file.originalname || "card.jpg",
+      contentType: req.file.mimetype || "image/jpeg"
     });
 
-    const data = await response.json();
+    // ⚠️ Replace with YOUR actual Card API if needed
+    const apiRes = await fetch("https://api.cardsight.ai/v1/identify/card", {
+      method: "POST",
+      body: formData
+    });
+
+    const text = await apiRes.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      return res.json({
+        success: false,
+        error: "API did not return JSON",
+        raw: text
+      });
+    }
+
+    const detection =
+      data?.data?.detections?.[0] ||
+      data?.detections?.[0] ||
+      data?.results?.[0] ||
+      data?.cards?.[0] ||
+      null;
+
+    if (!detection) {
+      return res.json({
+        success: false,
+        error: "No card detected",
+        raw: data
+      });
+    }
+
+    const card = detection.card || detection;
 
     const cardName =
-      data.output?.[0]?.content?.[0]?.text ||
-      "Unknown card";
+      card.name ||
+      card.title ||
+      card.player ||
+      "Card identified";
 
     res.json({
       success: true,
       name: cardName,
-      ebay:
+      year: card.year || "",
+      brand: card.manufacturer || card.brand || "",
+      set: card.releaseName || card.set || card.setName || "",
+      confidence: detection.confidence || detection.score || 0,
+
+      ebayUrl:
         "https://www.ebay.com/sch/i.html?_nkw=" +
-        encodeURIComponent(cardName)
+        encodeURIComponent(cardName) +
+        "&LH_Sold=1&LH_Complete=1",
+
+      raw: data
     });
 
   } catch (err) {
+    console.error(err);
     res.json({
       success: false,
       error: "Scan failed",
@@ -92,8 +99,9 @@ app.post("/scan-card", upload.single("image"), async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 10000;
+/* PORT FIX (IMPORTANT) */
+const port = process.env.PORT || 10000;
 
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+app.listen(port, () => {
+  console.log("Server running on port " + port);
 });
