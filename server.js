@@ -1,104 +1,91 @@
-import express from "express";
-import multer from "multer";
-import fetch from "node-fetch";
-import dotenv from "dotenv";
-import cors from "cors";
-import FormData from "form-data";
-
-dotenv.config();
+const express = require("express");
+const cors = require("cors");
+const multer = require("multer");
+const fetch = require("node-fetch");
 
 const app = express();
-const upload = multer();
-
 app.use(cors());
+app.use(express.json());
 
+const upload = multer({ storage: multer.memoryStorage() });
+
+// TEST ROUTE
 app.get("/", (req, res) => {
-  res.send("Card Scanner Backend Running");
+  res.send("AI Scanner Live ✅");
 });
 
+// TEST OPENAI ROUTE
+app.get("/test-openai", async (req, res) => {
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "gpt-5.3",
+        input: "Say hello"
+      })
+    });
+
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+// SCAN ROUTE
 app.post("/scan-card", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ success: false, error: "No image uploaded" });
+      return res.json({ success: false, error: "No image uploaded" });
     }
 
-    const formData = new FormData();
-    formData.append("image", req.file.buffer, {
-      filename: req.file.originalname || "card.jpg",
-      contentType: req.file.mimetype || "image/jpeg"
-    });
-
-    const csRes = await fetch("https://api.cardsight.ai/v1/identify/card", {
+    // SEND IMAGE TO OPENAI
+    const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "X-API-Key": process.env.CARDSIGHT_API_KEY
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
       },
-      body: formData
+      body: JSON.stringify({
+        model: "gpt-5.3",
+        input: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: "Identify this sports or Pokémon card. Return name only."
+              },
+              {
+                type: "input_image",
+                image_base64: req.file.buffer.toString("base64")
+              }
+            ]
+          }
+        ]
+      })
     });
 
-    const text = await csRes.text();
+    const data = await response.json();
 
-    let csData;
-    try {
-      csData = JSON.parse(text);
-    } catch {
-      return res.status(502).json({
-        success: false,
-        error: "CardSight returned non-JSON response",
-        status: csRes.status,
-        raw: text
-      });
-    }
-
-    if (!csRes.ok) {
-      return res.status(502).json({
-        success: false,
-        error: "CardSight API error",
-        status: csRes.status,
-        raw: csData
-      });
-    }
-
-    const detection =
-      csData?.data?.detections?.[0] ||
-      csData?.detections?.[0] ||
-      csData?.results?.[0] ||
-      csData?.cards?.[0] ||
-      null;
-
-    if (!detection) {
-      return res.json({
-        success: false,
-        message: "No card detected",
-        raw: csData
-      });
-    }
-
-    const card = detection.card || detection;
-
-    const cardName =
-      card.name ||
-      card.title ||
-      card.player ||
-      "Card identified";
+    const text =
+      data.output?.[0]?.content?.[0]?.text ||
+      "Unknown card";
 
     res.json({
       success: true,
-      name: cardName,
-      year: card.year || "",
-      brand: card.manufacturer || card.brand || "",
-      set: card.releaseName || card.set || card.setName || "",
-      confidence: detection.confidence || detection.score || 0,
+      name: text,
       ebay:
         "https://www.ebay.com/sch/i.html?_nkw=" +
-        encodeURIComponent(cardName) +
-        "&LH_Sold=1&LH_Complete=1&_sop=13",
-      raw: csData
+        encodeURIComponent(text)
     });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({
+    res.json({
       success: false,
       error: "Scan failed",
       details: err.message
@@ -106,7 +93,7 @@ app.post("/scan-card", upload.single("image"), async (req, res) => {
   }
 });
 
-const port = process.env.PORT || 10000;
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log("Server running on port", PORT);
 });
