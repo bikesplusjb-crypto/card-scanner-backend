@@ -1,77 +1,138 @@
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer");
 const fetch = require("node-fetch");
+const OpenAI = require("openai");
 
 const app = express();
+const upload = multer({ storage: multer.memoryStorage() });
+
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 const PORT = process.env.PORT || 3000;
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 let ebayToken = null;
 let ebayTokenExpires = 0;
 
+function safe(value, fallback = "Unknown") {
+  if (!value || value === null || value === "null") return fallback;
+  return String(value).trim() || fallback;
+}
+
+function extractJson(text) {
+  if (!text) return null;
+
+  let cleaned = text
+    .replace(/```json/g, "")
+    .replace(/```/g, "")
+    .trim();
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {}
+
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (match) {
+    try {
+      return JSON.parse(match[0]);
+    } catch {}
+  }
+
+  return null;
+}
+
+function fallbackScanResult(raw = "") {
+  const possibleName =
+    raw.match(/[A-Z][a-z]+ [A-Z][a-z]+/)?.[0] ||
+    "Unknown Player";
+
+  return {
+    ok: true,
+    cardName: possibleName,
+    player: possibleName,
+    sport: "Unknown",
+    year: "",
+    brand: "",
+    set: "",
+    team: "",
+    cardNumber: "",
+    confidence: "Low",
+    notes: "Scanner could not fully identify this card, but value search can still run."
+  };
+}
+
 async function getEbayToken() {
   if (ebayToken && Date.now() < ebayTokenExpires) return ebayToken;
 
-  const auth = Buffer.from(
-    `${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`
-  ).toString("base64");
+  const clientId = (process.env.EBAY_CLIENT_ID || "").trim();
+  const clientSecret = (process.env.EBAY_CLIENT_SECRET || "").trim();
+
+  if (!clientId || !clientSecret) {
+    throw new Error("Missing EBAY_CLIENT_ID or EBAY_CLIENT_SECRET");
+  }
+
+  const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 
   const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
     method: "POST",
     headers: {
       Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded"
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json"
     },
-    body: "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      scope: "https://api.ebay.com/oauth/api_scope"
+    }).toString()
   });
 
-  const data = await res.json();
+  const text = await res.text();
+  const data = JSON.parse(text);
 
-  if (!data.access_token) {
+  if (!res.ok || !data.access_token) {
     throw new Error("Could not get eBay token: " + JSON.stringify(data));
   }
 
   ebayToken = data.access_token;
   ebayTokenExpires = Date.now() + (data.expires_in - 60) * 1000;
+
   return ebayToken;
 }
 
 function moneyToNumber(item) {
-  const price = item?.price?.value;
-  const shipping = item?.shippingOptions?.[0]?.shippingCost?.value || 0;
-  return Number(price || 0) + Number(shipping || 0);
+  const price = Number(item?.price?.value || 0);
+  const shipping = Number(item?.shippingOptions?.[0]?.shippingCost?.value || 0);
+  return price + shipping;
 }
 
 function calcStats(prices) {
   if (!prices.length) {
-    return {
-      average: null,
-      low: null,
-      high: null,
-      count: 0
-    };
+    return { average: null, low: null, high: null, count: 0 };
   }
 
   const sorted = prices.sort((a, b) => a - b);
   const low = sorted[0];
   const high = sorted[sorted.length - 1];
-  const average = sorted.reduce((a, b) => a + b, 0) / sorted.length;
+  const average = prices.reduce((a, b) => a + b, 0) / prices.length;
 
   return {
     average: Number(average.toFixed(2)),
     low: Number(low.toFixed(2)),
     high: Number(high.toFixed(2)),
-    count: sorted.length
+    count: prices.length
   };
 }
 
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    message: "Premium Card Value Engine Running",
-    routes: ["/health", "/value"]
+    message: "Card scanner backend running",
+    routes: ["/health", "/scan", "/value"]
   });
 });
 
@@ -79,16 +140,114 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, message: "Backend connected" });
 });
 
+app.post("/scan", upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.json(fallbackScanResult("No image uploaded"));
+    }
+
+    const base64Image = req.file.buffer.toString("base64");
+    const mimeType = req.file.mimetype || "image/jpeg";
+
+    const response = await openai.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: `
+Identify this sports card.
+
+Return ONLY valid JSON.
+No markdown.
+No explanation.
+
+Use this exact format:
+
+{
+  "ok": true,
+  "cardName": "",
+  "player": "",
+  "sport": "",
+  "year": "",
+  "brand": "",
+  "set": "",
+  "team": "",
+  "cardNumber": "",
+  "confidence": "",
+  "notes": ""
+}
+
+If unknown, use empty string.
+Do not use null.
+`
+            },
+            {
+              type: "input_image",
+              image_url: `data:${mimeType};base64,${base64Image}`
+            }
+          ]
+        }
+      ]
+    });
+
+    const rawText = response.output_text || "";
+    const parsed = extractJson(rawText);
+
+    if (!parsed) {
+      return res.json(fallbackScanResult(rawText));
+    }
+
+    return res.json({
+      ok: true,
+      cardName: safe(parsed.cardName, parsed.player || "Unknown Card"),
+      player: safe(parsed.player, parsed.cardName || "Unknown Player"),
+      sport: safe(parsed.sport, ""),
+      year: safe(parsed.year, ""),
+      brand: safe(parsed.brand, ""),
+      set: safe(parsed.set, ""),
+      team: safe(parsed.team, ""),
+      cardNumber: safe(parsed.cardNumber, ""),
+      confidence: safe(parsed.confidence, "Medium"),
+      notes: safe(parsed.notes, "")
+    });
+  } catch (err) {
+    console.error("SCAN ERROR:", err.message);
+
+    return res.json({
+      ok: true,
+      cardName: "Unknown Card",
+      player: "Unknown Player",
+      sport: "",
+      year: "",
+      brand: "",
+      set: "",
+      team: "",
+      cardNumber: "",
+      confidence: "Low",
+      notes: "Scanner fallback used."
+    });
+  }
+});
+
 app.get("/value", async (req, res) => {
   try {
-    const { player = "", year = "", brand = "", set = "", cardNumber = "" } = req.query;
+    const {
+      player = "",
+      year = "",
+      brand = "",
+      set = "",
+      cardNumber = ""
+    } = req.query;
 
     const query = `${player} ${year} ${brand} ${set} ${cardNumber} sports card`
       .replace(/\s+/g, " ")
       .trim();
 
     if (!query || query.length < 3) {
-      return res.status(400).json({
+      return res.json({
         ok: false,
         error: "Missing card search details"
       });
@@ -96,14 +255,14 @@ app.get("/value", async (req, res) => {
 
     const token = await getEbayToken();
 
-    const url =
+    const ebayUrl =
       "https://api.ebay.com/buy/browse/v1/item_summary/search" +
       `?q=${encodeURIComponent(query)}` +
       "&category_ids=212" +
       "&limit=25" +
       "&filter=price:[1..10000],priceCurrency:USD";
 
-    const ebayRes = await fetch(url, {
+    const ebayRes = await fetch(ebayUrl, {
       headers: {
         Authorization: `Bearer ${token}`,
         "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
@@ -162,7 +321,7 @@ app.get("/value", async (req, res) => {
       }))
     });
   } catch (err) {
-    console.error("VALUE ERROR:", err);
+    console.error("VALUE ERROR:", err.message);
 
     res.status(500).json({
       ok: false,
@@ -173,5 +332,5 @@ app.get("/value", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Value engine running on port ${PORT}`);
+  console.log(`Backend running on port ${PORT}`);
 });
