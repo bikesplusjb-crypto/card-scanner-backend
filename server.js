@@ -19,7 +19,7 @@ const openai = new OpenAI({
 let ebayToken = null;
 let ebayTokenExpires = 0;
 
-function safe(value, fallback = "Unknown") {
+function safe(value, fallback = "") {
   if (!value || value === null || value === "null") return fallback;
   return String(value).trim() || fallback;
 }
@@ -27,10 +27,7 @@ function safe(value, fallback = "Unknown") {
 function extractJson(text) {
   if (!text) return null;
 
-  let cleaned = text
-    .replace(/```json/g, "")
-    .replace(/```/g, "")
-    .trim();
+  let cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
   try {
     return JSON.parse(cleaned);
@@ -46,6 +43,20 @@ function extractJson(text) {
   return null;
 }
 
+function cleanYear(year) {
+  if (!year) return "";
+
+  const match = String(year).match(/\b(19[0-9]{2}|20[0-9]{2})\b/);
+  if (!match) return "";
+
+  const y = Number(match[0]);
+  const currentYear = new Date().getFullYear();
+
+  if (y < 1900 || y > currentYear) return "";
+
+  return String(y);
+}
+
 function fallbackScanResult(raw = "") {
   const possibleName =
     raw.match(/[A-Z][a-z]+ [A-Z][a-z]+/)?.[0] ||
@@ -55,14 +66,14 @@ function fallbackScanResult(raw = "") {
     ok: true,
     cardName: possibleName,
     player: possibleName,
-    sport: "Unknown",
+    sport: "",
     year: "",
     brand: "",
     set: "",
     team: "",
     cardNumber: "",
     confidence: "Low",
-    notes: "Scanner could not fully identify this card, but value search can still run."
+    notes: "Fallback scan result used."
   };
 }
 
@@ -73,7 +84,7 @@ async function getEbayToken() {
   const clientSecret = (process.env.EBAY_CLIENT_SECRET || "").trim();
 
   if (!clientId || !clientSecret) {
-    throw new Error("Missing EBAY_CLIENT_ID or EBAY_CLIENT_SECRET");
+    throw new Error("Missing eBay keys");
   }
 
   const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
@@ -91,8 +102,7 @@ async function getEbayToken() {
     }).toString()
   });
 
-  const text = await res.text();
-  const data = JSON.parse(text);
+  const data = await res.json();
 
   if (!res.ok || !data.access_token) {
     throw new Error("Could not get eBay token: " + JSON.stringify(data));
@@ -182,6 +192,7 @@ Use this exact format:
 
 If unknown, use empty string.
 Do not use null.
+Do not guess future years.
 `
             },
             {
@@ -200,12 +211,14 @@ Do not use null.
       return res.json(fallbackScanResult(rawText));
     }
 
+    const fixedYear = cleanYear(parsed.year);
+
     return res.json({
       ok: true,
       cardName: safe(parsed.cardName, parsed.player || "Unknown Card"),
       player: safe(parsed.player, parsed.cardName || "Unknown Player"),
       sport: safe(parsed.sport, ""),
-      year: safe(parsed.year, ""),
+      year: fixedYear,
       brand: safe(parsed.brand, ""),
       set: safe(parsed.set, ""),
       team: safe(parsed.team, ""),
@@ -215,43 +228,17 @@ Do not use null.
     });
   } catch (err) {
     console.error("SCAN ERROR:", err.message);
-
-    return res.json({
-      ok: true,
-      cardName: "Unknown Card",
-      player: "Unknown Player",
-      sport: "",
-      year: "",
-      brand: "",
-      set: "",
-      team: "",
-      cardNumber: "",
-      confidence: "Low",
-      notes: "Scanner fallback used."
-    });
+    return res.json(fallbackScanResult("Scanner fallback used"));
   }
 });
 
 app.get("/value", async (req, res) => {
   try {
-    const {
-      player = "",
-      year = "",
-      brand = "",
-      set = "",
-      cardNumber = ""
-    } = req.query;
+    const { player = "", year = "", brand = "", set = "", cardNumber = "" } = req.query;
 
     const query = `${player} ${year} ${brand} ${set} ${cardNumber} sports card`
       .replace(/\s+/g, " ")
       .trim();
-
-    if (!query || query.length < 3) {
-      return res.json({
-        ok: false,
-        error: "Missing card search details"
-      });
-    }
 
     const token = await getEbayToken();
 
@@ -312,17 +299,10 @@ app.get("/value", async (req, res) => {
       marketSignal,
       signalColor,
       activeUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}`,
-      soldUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1`,
-      items: items.slice(0, 6).map(item => ({
-        title: item.title,
-        price: item.price,
-        image: item.image?.imageUrl,
-        url: item.itemWebUrl
-      }))
+      soldUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1`
     });
   } catch (err) {
     console.error("VALUE ERROR:", err.message);
-
     res.status(500).json({
       ok: false,
       error: "Value engine failed",
