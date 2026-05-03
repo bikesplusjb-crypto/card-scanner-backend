@@ -27,7 +27,7 @@ function safe(value, fallback = "") {
 function extractJson(text) {
   if (!text) return null;
 
-  let cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
+  const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
   try {
     return JSON.parse(cleaned);
@@ -45,7 +45,6 @@ function extractJson(text) {
 
 function cleanYear(year) {
   if (!year) return "";
-
   const match = String(year).match(/\b(19[0-9]{2}|20[0-9]{2})\b/);
   if (!match) return "";
 
@@ -53,19 +52,14 @@ function cleanYear(year) {
   const currentYear = new Date().getFullYear();
 
   if (y < 1900 || y > currentYear) return "";
-
   return String(y);
 }
 
-function fallbackScanResult(raw = "") {
-  const possibleName =
-    raw.match(/[A-Z][a-z]+ [A-Z][a-z]+/)?.[0] ||
-    "Unknown Player";
-
+function fallbackScanResult() {
   return {
     ok: true,
-    cardName: possibleName,
-    player: possibleName,
+    cardName: "Unknown Card",
+    player: "Unknown Player",
     sport: "",
     year: "",
     brand: "",
@@ -141,7 +135,7 @@ function calcStats(prices) {
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    message: "Card scanner backend running",
+    message: "Front + Back Card Scanner Backend Running",
     routes: ["/health", "/scan", "/value"]
   });
 });
@@ -150,31 +144,45 @@ app.get("/health", (req, res) => {
   res.json({ ok: true, message: "Backend connected" });
 });
 
-app.post("/scan", upload.single("image"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.json(fallbackScanResult("No image uploaded"));
-    }
+app.post(
+  "/scan",
+  upload.fields([
+    { name: "front", maxCount: 1 },
+    { name: "back", maxCount: 1 },
+    { name: "image", maxCount: 1 }
+  ]),
+  async (req, res) => {
+    try {
+      const frontFile = req.files?.front?.[0] || req.files?.image?.[0];
+      const backFile = req.files?.back?.[0];
 
-    const base64Image = req.file.buffer.toString("base64");
-    const mimeType = req.file.mimetype || "image/jpeg";
+      if (!frontFile) {
+        return res.json(fallbackScanResult());
+      }
 
-    const response = await openai.responses.create({
-      model: "gpt-4.1-mini",
-      input: [
+      const content = [
         {
-          role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: `
-Identify this sports card.
+          type: "input_text",
+          text: `
+You are a sports card identification engine.
 
-Return ONLY valid JSON.
-No markdown.
-No explanation.
+You may receive:
+1. Front image
+2. Back image
 
-Use this exact format:
+Use BOTH images when available.
+
+Important rules:
+- Use the back image for year, card number, copyright line, set, and brand.
+- Do NOT guess the year.
+- If the year is not visible, use empty string.
+- If card number is visible on the back, include it.
+- Return ONLY valid JSON.
+- No markdown.
+- No explanation.
+- Do not use null.
+
+Use this exact JSON format:
 
 {
   "ok": true,
@@ -189,48 +197,57 @@ Use this exact format:
   "confidence": "",
   "notes": ""
 }
-
-If unknown, use empty string.
-Do not use null.
-Do not guess future years.
 `
-            },
-            {
-              type: "input_image",
-              image_url: `data:${mimeType};base64,${base64Image}`
-            }
-          ]
         }
-      ]
-    });
+      ];
 
-    const rawText = response.output_text || "";
-    const parsed = extractJson(rawText);
+      const frontBase64 = frontFile.buffer.toString("base64");
+      content.push({
+        type: "input_image",
+        image_url: `data:${frontFile.mimetype || "image/jpeg"};base64,${frontBase64}`
+      });
 
-    if (!parsed) {
-      return res.json(fallbackScanResult(rawText));
+      if (backFile) {
+        const backBase64 = backFile.buffer.toString("base64");
+        content.push({
+          type: "input_image",
+          image_url: `data:${backFile.mimetype || "image/jpeg"};base64,${backBase64}`
+        });
+      }
+
+      const response = await openai.responses.create({
+        model: "gpt-4.1-mini",
+        input: [{ role: "user", content }]
+      });
+
+      const rawText = response.output_text || "";
+      const parsed = extractJson(rawText);
+
+      if (!parsed) {
+        return res.json(fallbackScanResult());
+      }
+
+      const fixedYear = cleanYear(parsed.year);
+
+      return res.json({
+        ok: true,
+        cardName: safe(parsed.cardName, parsed.player || "Unknown Card"),
+        player: safe(parsed.player, parsed.cardName || "Unknown Player"),
+        sport: safe(parsed.sport, ""),
+        year: fixedYear,
+        brand: safe(parsed.brand, ""),
+        set: safe(parsed.set, ""),
+        team: safe(parsed.team, ""),
+        cardNumber: safe(parsed.cardNumber, ""),
+        confidence: safe(parsed.confidence, "Medium"),
+        notes: safe(parsed.notes, backFile ? "Front and back scan used." : "Front-only scan used.")
+      });
+    } catch (err) {
+      console.error("SCAN ERROR:", err.message);
+      return res.json(fallbackScanResult());
     }
-
-    const fixedYear = cleanYear(parsed.year);
-
-    return res.json({
-      ok: true,
-      cardName: safe(parsed.cardName, parsed.player || "Unknown Card"),
-      player: safe(parsed.player, parsed.cardName || "Unknown Player"),
-      sport: safe(parsed.sport, ""),
-      year: fixedYear,
-      brand: safe(parsed.brand, ""),
-      set: safe(parsed.set, ""),
-      team: safe(parsed.team, ""),
-      cardNumber: safe(parsed.cardNumber, ""),
-      confidence: safe(parsed.confidence, "Medium"),
-      notes: safe(parsed.notes, "")
-    });
-  } catch (err) {
-    console.error("SCAN ERROR:", err.message);
-    return res.json(fallbackScanResult("Scanner fallback used"));
   }
-});
+);
 
 app.get("/value", async (req, res) => {
   try {
@@ -239,6 +256,10 @@ app.get("/value", async (req, res) => {
     const query = `${player} ${year} ${brand} ${set} ${cardNumber} sports card`
       .replace(/\s+/g, " ")
       .trim();
+
+    if (!query || query.length < 3) {
+      return res.json({ ok: false, error: "Missing search details" });
+    }
 
     const token = await getEbayToken();
 
