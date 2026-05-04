@@ -136,7 +136,7 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     message: "Front + Back Card Scanner Backend Running",
-    routes: ["/health", "/scan", "/value"]
+    routes: ["/health", "/scan", "/value", "/api/pokemon-movers"]
   });
 });
 
@@ -330,6 +330,66 @@ app.get("/value", async (req, res) => {
       details: err.message
     });
   }
+});
+
+/* NEW POKEMON MOVERS API */
+app.get("/api/pokemon-movers", async (req, res) => {
+  res.json({
+    ok: true,
+    updated: new Date().toISOString(),
+    movers: [
+      {
+        name: "Charizard Base Set PSA 10",
+        set: "Base Set",
+        price: 13500,
+        change: 14.8,
+        signal: "BUY",
+        score: 96,
+        risk: "Medium",
+        reason: "Iconic card with strong collector demand and high liquidity."
+      },
+      {
+        name: "Pikachu Van Gogh",
+        set: "Promo",
+        price: 185,
+        change: 9.2,
+        signal: "HOLD",
+        score: 88,
+        risk: "Low-Medium",
+        reason: "Limited promo card with strong attention and steady demand."
+      },
+      {
+        name: "Umbreon VMAX Alt Art",
+        set: "Evolving Skies",
+        price: 850,
+        change: 6.7,
+        signal: "BUY",
+        score: 91,
+        risk: "Medium",
+        reason: "Modern chase card with high collector interest."
+      },
+      {
+        name: "Lugia V Alt Art",
+        set: "Silver Tempest",
+        price: 165,
+        change: 5.4,
+        signal: "HOLD",
+        score: 84,
+        risk: "Medium",
+        reason: "Popular legendary Pokémon with steady collector demand."
+      },
+      {
+        name: "Moonbreon PSA 10",
+        set: "Evolving Skies",
+        price: 1450,
+        change: 7.8,
+        signal: "BUY",
+        score: 93,
+        risk: "Medium-High",
+        reason: "Premium modern grail card with strong market attention."
+      }
+    ]
+  });
 });
 
 app.listen(PORT, () => {
