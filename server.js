@@ -2,7 +2,6 @@ const express = require("express");
 const cors = require("cors");
 
 const app = express();
-
 app.use(cors());
 app.use(express.json({ limit: "25mb" }));
 
@@ -32,12 +31,10 @@ async function getEbayToken() {
   });
 
   const data = await res.json();
-
   if (!data.access_token) return null;
 
   ebayToken = data.access_token;
   ebayTokenExpires = Date.now() + (data.expires_in - 60) * 1000;
-
   return ebayToken;
 }
 
@@ -61,6 +58,15 @@ function yahooUrl(ticker) {
   return "https://finance.yahoo.com/quote/" + encodeURIComponent(ticker);
 }
 
+function riskNumber(risk) {
+  const r = String(risk || "").toLowerCase();
+  if (r.includes("high")) return 68;
+  if (r.includes("medium-high")) return 60;
+  if (r.includes("medium")) return 50;
+  if (r.includes("low")) return 34;
+  return 50;
+}
+
 function scoreAsset(asset) {
   return Math.round(
     asset.aiScore * 0.35 +
@@ -70,16 +76,34 @@ function scoreAsset(asset) {
   );
 }
 
+function stockData() {
+  return [
+    { ticker: "NVDA", name: "Nvidia", price: 912.5, change: 2.34, volume: "52M", aiScore: 96, trend: "Strong Uptrend", risk: "Medium", signal: "🔥 Strong Buy" },
+    { ticker: "TSLA", name: "Tesla", price: 178.22, change: -1.12, volume: "41M", aiScore: 78, trend: "Pullback", risk: "High", signal: "⚠️ Watch" },
+    { ticker: "AAPL", name: "Apple", price: 189.1, change: 0.45, volume: "30M", aiScore: 84, trend: "Stable Uptrend", risk: "Low", signal: "📈 Hold" },
+    { ticker: "SMCI", name: "Super Micro Computer", price: 950, change: 5.8, volume: "27M", aiScore: 91, trend: "Momentum", risk: "Medium-High", signal: "🚀 Momentum" },
+    { ticker: "PLTR", name: "Palantir", price: 24.85, change: 1.95, volume: "65M", aiScore: 88, trend: "AI Momentum", risk: "Medium", signal: "🔥 Hot" },
+    { ticker: "AMD", name: "AMD", price: 158.4, change: 1.35, volume: "48M", aiScore: 86, trend: "AI chip momentum", risk: "Medium", signal: "📈 Watch" }
+  ];
+}
+
+function pokemonData() {
+  return [
+    { name: "Charizard Base Set", price: 425, change: 18, volume: "High", aiScore: 94, score: 94, trend: "Icon collectible demand", risk: "Medium", signal: "🔥 Hot", demand: "Very Strong" },
+    { name: "Pikachu Promo", price: 89, change: 7, volume: "Medium", aiScore: 86, score: 86, trend: "Mainstream collector appeal", risk: "Medium", signal: "📈 Rising", demand: "Strong" },
+    { name: "Lugia Neo Genesis", price: 310, change: -4, volume: "Medium", aiScore: 76, score: 76, trend: "Cooling after recent demand", risk: "Medium", signal: "⚠️ Watch", demand: "Moderate" }
+  ];
+}
+
 async function getEbayMarketData(query) {
   try {
     const token = await getEbayToken();
 
     if (!token) {
       return {
-        source: "eBay search link",
-        price: "Market Search",
+        source: "eBay search estimate",
+        price: "Search Market",
         activeListings: "Search available",
-        soldAvg: null,
         url: ebaySearchUrl(query),
         soldUrl: ebaySoldUrl(query)
       };
@@ -88,7 +112,7 @@ async function getEbayMarketData(query) {
     const url =
       "https://api.ebay.com/buy/browse/v1/item_summary/search?q=" +
       encodeURIComponent(query) +
-      "&limit=10";
+      "&filter=buyingOptions:{FIXED_PRICE|AUCTION},priceCurrency:USD&limit=20";
 
     const res = await fetch(url, {
       headers: {
@@ -100,143 +124,38 @@ async function getEbayMarketData(query) {
     const data = await res.json();
     const items = data.itemSummaries || [];
 
-    const prices = items
+    let prices = items
       .map(item => Number(item.price && item.price.value))
-      .filter(n => !isNaN(n) && n > 0);
+      .filter(n => !isNaN(n) && n > 20);
+
+    prices = prices.sort((a, b) => a - b);
+
+    let cleaned = prices;
+    if (prices.length >= 6) {
+      cleaned = prices.slice(1, -1);
+    }
 
     const avg =
-      prices.length > 0
-        ? Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
+      cleaned.length > 0
+        ? Math.round(cleaned.reduce((a, b) => a + b, 0) / cleaned.length)
         : null;
 
     return {
-      source: "eBay Browse API",
-      price: avg ? `$${avg.toLocaleString()}` : "Market Search",
+      source: "eBay active listing estimate",
+      price: avg ? `$${avg.toLocaleString()} Est.` : "Search Market",
       activeListings: items.length,
-      soldAvg: null,
       url: ebaySearchUrl(query),
       soldUrl: ebaySoldUrl(query)
     };
   } catch (err) {
     return {
       source: "eBay fallback",
-      price: "Market Search",
+      price: "Search Market",
       activeListings: "Search available",
-      soldAvg: null,
       url: ebaySearchUrl(query),
       soldUrl: ebaySoldUrl(query)
     };
   }
-}
-
-function stockData() {
-  return [
-    {
-      ticker: "NVDA",
-      name: "Nvidia",
-      price: 912.5,
-      change: 2.34,
-      volume: "52M",
-      aiScore: 96,
-      trend: "Strong Uptrend",
-      risk: "Medium",
-      signal: "🔥 Strong Buy"
-    },
-    {
-      ticker: "TSLA",
-      name: "Tesla",
-      price: 178.22,
-      change: -1.12,
-      volume: "41M",
-      aiScore: 78,
-      trend: "Pullback",
-      risk: "High",
-      signal: "⚠️ Watch"
-    },
-    {
-      ticker: "AAPL",
-      name: "Apple",
-      price: 189.1,
-      change: 0.45,
-      volume: "30M",
-      aiScore: 84,
-      trend: "Stable Uptrend",
-      risk: "Low",
-      signal: "📈 Hold"
-    },
-    {
-      ticker: "SMCI",
-      name: "Super Micro Computer",
-      price: 950,
-      change: 5.8,
-      volume: "27M",
-      aiScore: 91,
-      trend: "Momentum",
-      risk: "Medium-High",
-      signal: "🚀 Momentum"
-    },
-    {
-      ticker: "PLTR",
-      name: "Palantir",
-      price: 24.85,
-      change: 1.95,
-      volume: "65M",
-      aiScore: 88,
-      trend: "AI Momentum",
-      risk: "Medium",
-      signal: "🔥 Hot"
-    }
-  ];
-}
-
-function pokemonData() {
-  return [
-    {
-      name: "Charizard Base Set",
-      price: 425,
-      change: 18,
-      volume: "High",
-      aiScore: 94,
-      score: 94,
-      trend: "Icon collectible demand",
-      risk: "Medium",
-      signal: "🔥 Hot",
-      demand: "Very Strong"
-    },
-    {
-      name: "Pikachu Promo",
-      price: 89,
-      change: 7,
-      volume: "Medium",
-      aiScore: 86,
-      score: 86,
-      trend: "Mainstream collector appeal",
-      risk: "Medium",
-      signal: "📈 Rising",
-      demand: "Strong"
-    },
-    {
-      name: "Lugia Neo Genesis",
-      price: 310,
-      change: -4,
-      volume: "Medium",
-      aiScore: 76,
-      score: 76,
-      trend: "Cooling after recent demand",
-      risk: "Medium",
-      signal: "⚠️ Watch",
-      demand: "Moderate"
-    }
-  ];
-}
-
-function riskNumber(risk) {
-  const r = String(risk || "").toLowerCase();
-  if (r.includes("high")) return 68;
-  if (r.includes("medium-high")) return 60;
-  if (r.includes("medium")) return 50;
-  if (r.includes("low")) return 34;
-  return 50;
 }
 
 async function buildAsset(query) {
@@ -291,13 +210,13 @@ async function buildAsset(query) {
       tag: "💎 POKÉMON",
       name: found ? found.name : q,
       label: "Pokémon Card",
-      price: market.price || (found ? `$${found.price}` : "Market Search"),
+      price: market.price || "Search Market",
       move: `Trend Score: +${change}%`,
       aiScore: score,
       momentum: Math.min(99, Math.max(50, Math.round(score + change))),
       demand: found && found.demand === "Very Strong" ? 96 : found && found.demand === "Strong" ? 90 : 82,
       risk: riskNumber(found ? found.risk : "Medium"),
-      reason: found ? found.trend : "Pokémon collectible demand, market searches, and pricing interest are being analyzed.",
+      reason: found ? found.trend : "Pokémon collectible demand, marketplace searches, and pricing interest are being analyzed.",
       source: market.source,
       url: market.url,
       soldUrl: market.soldUrl,
@@ -352,7 +271,7 @@ app.get("/api/pokemon-movers", (req, res) => {
     updated: new Date().toISOString(),
     pokemon: pokemonData(),
     movers: pokemonData(),
-    pricingType: "Pokémon backend + eBay search links"
+    pricingType: "Pokémon backend + eBay estimate"
   });
 });
 
