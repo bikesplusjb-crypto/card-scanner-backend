@@ -1,27 +1,49 @@
 const express = require("express");
 const cors = require("cors");
+const fetch = require("node-fetch");
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+
+const EBAY_CLIENT_ID = process.env.EBAY_CLIENT_ID;
+const EBAY_CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET;
+const EBAY_CAMPAIGN_ID = process.env.EBAY_CAMPAIGN_ID || "5339149252";
 
 let ebayToken = null;
 let ebayTokenExpires = 0;
 
-/* ---------------- EBAY TOKEN ---------------- */
+const underFiveStocks = [
+  "FUBO", "SOFI", "LCID", "SIRI", "OPEN", "PLUG", "RIVN", "DNA", "BBAI", "SOUN"
+];
+
+const cardIdeas = [
+  "Victor Wembanyama base card",
+  "Shohei Ohtani rookie card",
+  "Patrick Mahomes rookie card",
+  "Charizard Pokemon card",
+  "Pikachu promo card",
+  "LeBron James card",
+  "Aaron Judge rookie card",
+  "CJ Stroud rookie card",
+  "Jackson Holliday rookie card",
+  "Pokemon Charmander card"
+];
+
+function pickRandom(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
 
 async function getEbayToken() {
   if (ebayToken && Date.now() < ebayTokenExpires) return ebayToken;
 
-  if (!process.env.EBAY_CLIENT_ID || !process.env.EBAY_CLIENT_SECRET) {
-    return null;
+  if (!EBAY_CLIENT_ID || !EBAY_CLIENT_SECRET) {
+    throw new Error("Missing EBAY_CLIENT_ID or EBAY_CLIENT_SECRET");
   }
 
-  const auth = Buffer.from(
-    process.env.EBAY_CLIENT_ID + ":" + process.env.EBAY_CLIENT_SECRET
-  ).toString("base64");
+  const auth = Buffer.from(`${EBAY_CLIENT_ID}:${EBAY_CLIENT_SECRET}`).toString("base64");
 
   const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
     method: "POST",
@@ -33,451 +55,299 @@ async function getEbayToken() {
   });
 
   const data = await res.json();
-  if (!data.access_token) return null;
+
+  if (!data.access_token) {
+    console.log("eBay token error:", data);
+    throw new Error("Could not get eBay token");
+  }
 
   ebayToken = data.access_token;
-  ebayTokenExpires = Date.now() + (data.expires_in - 60) * 1000;
+  ebayTokenExpires = Date.now() + (data.expires_in - 120) * 1000;
   return ebayToken;
 }
 
-/* ---------------- HELPERS ---------------- */
+async function getStockData(symbol) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`;
 
-function isStock(query) {
-  return /^[A-Z]{1,5}$/.test(String(query).trim().toUpperCase());
-}
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0"
+    }
+  });
 
-function isPokemon(query) {
-  return /pokemon|charizard|pikachu|lugia|mewtwo|mew|blastoise|venusaur|eevee|snorlax|psa|base set|promo|neo genesis/i.test(query);
-}
+  const data = await res.json();
+  const result = data?.chart?.result?.[0];
 
-function ebaySearchUrl(query) {
-  return "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(query);
-}
-
-function ebaySoldUrl(query) {
-  return ebaySearchUrl(query) + "&LH_Sold=1&LH_Complete=1";
-}
-
-function yahooUrl(ticker) {
-  return "https://finance.yahoo.com/quote/" + encodeURIComponent(ticker);
-}
-
-function riskNumber(risk) {
-  const r = String(risk || "").toLowerCase();
-  if (r.includes("high")) return 68;
-  if (r.includes("medium-high")) return 60;
-  if (r.includes("medium")) return 50;
-  if (r.includes("low")) return 34;
-  return 50;
-}
-
-function scoreAsset(asset) {
-  return Math.round(
-    asset.aiScore * 0.35 +
-    asset.momentum * 0.25 +
-    asset.demand * 0.25 -
-    asset.risk * 0.15
-  );
-}
-
-/* ---------------- BUY / WAIT / AVOID LOGIC ---------------- */
-
-function getActionSignal(asset) {
-  const score = Number(asset.matchupScore || 0);
-  const momentum = Number(asset.momentum || 0);
-  const risk = Number(asset.risk || 50);
-  const demand = Number(asset.demand || 0);
-
-  if (score >= 75 && momentum >= 80 && demand >= 80 && risk <= 55) {
-    return {
-      action: "BUY",
-      color: "green",
-      reason: "Strong momentum, high demand, and acceptable risk."
-    };
+  if (!result) {
+    throw new Error(`No stock data for ${symbol}`);
   }
 
-  if (score >= 64 && momentum >= 70 && risk <= 65) {
-    return {
-      action: "WAIT",
-      color: "yellow",
-      reason: "Good setup, but risk or momentum needs confirmation."
-    };
-  }
+  const meta = result.meta;
+  const price = meta.regularMarketPrice || meta.previousClose || 0;
+  const previousClose = meta.previousClose || price;
+
+  const change = price - previousClose;
+  const changePercent = previousClose ? (change / previousClose) * 100 : 0;
 
   return {
-    action: "AVOID",
-    color: "red",
-    reason: "Risk is too high or momentum is not strong enough."
+    symbol,
+    price: Number(price.toFixed(2)),
+    change: Number(change.toFixed(2)),
+    changePercent: Number(changePercent.toFixed(2)),
+    stockUrl: `https://finance.yahoo.com/quote/${symbol}`
   };
 }
 
-/* ---------------- LIVE YAHOO STOCK DATA ---------------- */
+async function getCardData(query) {
+  const token = await getEbayToken();
 
-async function getYahooStockData(ticker) {
-  try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5d&interval=1d`;
-
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0" }
+  const searchUrl =
+    "https://api.ebay.com/buy/browse/v1/item_summary/search?" +
+    new URLSearchParams({
+      q: query,
+      limit: "10",
+      filter: "buyingOptions:{FIXED_PRICE}"
     });
 
-    const data = await res.json();
-
-    if (
-      !data ||
-      !data.chart ||
-      !data.chart.result ||
-      !data.chart.result[0] ||
-      !data.chart.result[0].meta
-    ) {
-      return null;
+  const res = await fetch(searchUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
     }
+  });
 
-    const meta = data.chart.result[0].meta;
-    const price = Number(meta.regularMarketPrice);
-    const previous = Number(meta.chartPreviousClose || meta.previousClose);
+  const data = await res.json();
 
-    if (!price || isNaN(price)) return null;
+  const items = data.itemSummaries || [];
 
-    const change = previous
-      ? Number((((price - previous) / previous) * 100).toFixed(2))
+  const prices = items
+    .map(item => Number(item?.price?.value))
+    .filter(price => !isNaN(price) && price > 0);
+
+  const avgPrice =
+    prices.length > 0
+      ? prices.reduce((a, b) => a + b, 0) / prices.length
       : 0;
 
-    return {
-      ticker: ticker.toUpperCase(),
-      name: meta.longName || meta.shortName || meta.symbol || ticker.toUpperCase(),
-      price,
-      change,
-      volume: "Live",
-      aiScore: change >= 3 ? 90 : change >= 1 ? 86 : change >= 0 ? 82 : 74,
-      trend:
-        change >= 3
-          ? "Strong Uptrend"
-          : change >= 1
-          ? "Positive Momentum"
-          : change >= 0
-          ? "Market Watch"
-          : "Pullback",
-      risk: Math.abs(change) >= 5 ? "High" : Math.abs(change) >= 2 ? "Medium" : "Low",
-      signal:
-        change >= 3
-          ? "🔥 Momentum"
-          : change >= 1
-          ? "📈 Watch"
-          : change >= 0
-          ? "Hold"
-          : "⚠️ Pullback"
-    };
-  } catch (err) {
-    console.log("Yahoo stock fetch failed:", ticker, err.message);
-    return null;
-  }
+  const bestItem = items[0];
+
+  return {
+    query,
+    averagePrice: Number(avgPrice.toFixed(2)),
+    listingsFound: items.length,
+    ebayUrl:
+      `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&campid=${EBAY_CAMPAIGN_ID}`,
+    image: bestItem?.image?.imageUrl || null,
+    title: bestItem?.title || query
+  };
 }
 
-/* ---------------- FALLBACK STOCK DATA ---------------- */
+function scoreMatchup(stock, card) {
+  let stockScore = 50;
+  let cardScore = 50;
 
-function stockData() {
-  return [
-    { ticker: "NVDA", name: "Nvidia", price: 912.5, change: 2.34, volume: "52M", aiScore: 96, trend: "Strong Uptrend", risk: "Medium", signal: "🔥 Strong Buy" },
-    { ticker: "TSLA", name: "Tesla", price: 178.22, change: -1.12, volume: "41M", aiScore: 78, trend: "Pullback", risk: "High", signal: "⚠️ Watch" },
-    { ticker: "AAPL", name: "Apple", price: 189.1, change: 0.45, volume: "30M", aiScore: 84, trend: "Stable Uptrend", risk: "Low", signal: "📈 Hold" },
-    { ticker: "SMCI", name: "Super Micro Computer", price: 950, change: 5.8, volume: "27M", aiScore: 91, trend: "Momentum", risk: "Medium-High", signal: "🚀 Momentum" },
-    { ticker: "PLTR", name: "Palantir", price: 24.85, change: 1.95, volume: "65M", aiScore: 88, trend: "AI Momentum", risk: "Medium", signal: "🔥 Hot" },
-    { ticker: "AMD", name: "AMD", price: 158.4, change: 1.35, volume: "48M", aiScore: 86, trend: "AI chip momentum", risk: "Medium", signal: "📈 Watch" }
-  ];
+  if (stock.changePercent > 5) stockScore += 25;
+  else if (stock.changePercent > 2) stockScore += 15;
+  else if (stock.changePercent > 0) stockScore += 8;
+  else if (stock.changePercent < -5) stockScore -= 20;
+  else if (stock.changePercent < 0) stockScore -= 8;
+
+  if (stock.price < 5) stockScore += 8;
+
+  if (card.listingsFound >= 8) cardScore += 18;
+  else if (card.listingsFound >= 4) cardScore += 10;
+
+  if (card.averagePrice > 0 && card.averagePrice <= 10) cardScore += 10;
+  if (card.averagePrice > 50) cardScore -= 6;
+
+  const winner = stockScore >= cardScore ? stock.symbol : card.query;
+
+  let decision = "WAIT";
+  let confidence = Math.min(95, Math.abs(stockScore - cardScore) + 60);
+
+  if (stockScore - cardScore >= 15) decision = `BUY ${stock.symbol}`;
+  else if (cardScore - stockScore >= 15) decision = `BUY CARD`;
+  else if (stock.changePercent < -7) decision = `AVOID ${stock.symbol}`;
+
+  const reason =
+    stockScore > cardScore
+      ? `${stock.symbol} has stronger short-term momentum and higher liquidity.`
+      : `${card.query} has better collectible demand based on current eBay listings.`;
+
+  return {
+    stockScore,
+    cardScore,
+    winner,
+    decision,
+    confidence,
+    reason
+  };
 }
 
-/* ---------------- POKEMON DATA ---------------- */
+function buildTikTokScript(matchup) {
+  return {
+    hook: `Would you rather buy ${matchup.stock.symbol} stock or a ${matchup.card.query} under $5?`,
+    script:
+`Here is today's AI Market Matchup.
 
-function pokemonData() {
-  return [
-    { name: "Charizard Base Set", price: 425, change: 18, volume: "High", aiScore: 94, score: 94, trend: "Icon collectible demand", risk: "Medium", signal: "🔥 Hot", demand: "Very Strong" },
-    { name: "Pikachu Promo", price: 89, change: 7, volume: "Medium", aiScore: 86, score: 86, trend: "Mainstream collector appeal", risk: "Medium", signal: "📈 Rising", demand: "Strong" },
-    { name: "Lugia Neo Genesis", price: 310, change: -4, volume: "Medium", aiScore: 76, score: 76, trend: "Cooling after recent demand", risk: "Medium", signal: "⚠️ Watch", demand: "Moderate" }
-  ];
+On one side: ${matchup.stock.symbol}, trading around $${matchup.stock.price}, with a ${matchup.stock.changePercent}% move.
+
+On the other side: ${matchup.card.query}, with an average eBay listing price around $${matchup.card.averagePrice}.
+
+The AI pick today is: ${matchup.analysis.decision}.
+
+Reason: ${matchup.analysis.reason}
+
+Would you take the stock or the card?`,
+    caption: `${matchup.stock.symbol} vs ${matchup.card.query} 👀 AI pick: ${matchup.analysis.decision}. Stock or card?`,
+    hashtags: [
+      "#sportscards",
+      "#pokemoncards",
+      "#pennystocks",
+      "#stocks",
+      "#collectibles",
+      "#investing",
+      "#cardcollector",
+      "#aitools"
+    ]
+  };
 }
 
-/* ---------------- EBAY MARKET DATA ---------------- */
+async function buildMatchup(stockSymbol, cardQuery) {
+  const stock = await getStockData(stockSymbol);
+  const card = await getCardData(cardQuery);
+  const analysis = scoreMatchup(stock, card);
 
-async function getEbayMarketData(query) {
-  try {
-    const token = await getEbayToken();
-
-    if (!token) {
-      return {
-        source: "eBay search estimate",
-        price: "Search Market",
-        activeListings: "Search available",
-        url: ebaySearchUrl(query),
-        soldUrl: ebaySoldUrl(query)
-      };
-    }
-
-    const url =
-      "https://api.ebay.com/buy/browse/v1/item_summary/search?q=" +
-      encodeURIComponent(query) +
-      "&filter=buyingOptions:{FIXED_PRICE|AUCTION},priceCurrency:USD&limit=20";
-
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
-      }
-    });
-
-    const data = await res.json();
-    const items = data.itemSummaries || [];
-
-    let prices = items
-      .map(item => Number(item.price && item.price.value))
-      .filter(n => !isNaN(n) && n > 20);
-
-    prices = prices.sort((a, b) => a - b);
-
-    let cleaned = prices;
-    if (prices.length >= 6) cleaned = prices.slice(1, -1);
-
-    const avg =
-      cleaned.length > 0
-        ? Math.round(cleaned.reduce((a, b) => a + b, 0) / cleaned.length)
-        : null;
-
-    return {
-      source: "eBay active listing estimate",
-      price: avg ? `$${avg.toLocaleString()} Est.` : "Search Market",
-      activeListings: items.length,
-      url: ebaySearchUrl(query),
-      soldUrl: ebaySoldUrl(query)
-    };
-  } catch (err) {
-    return {
-      source: "eBay fallback",
-      price: "Search Market",
-      activeListings: "Search available",
-      url: ebaySearchUrl(query),
-      soldUrl: ebaySoldUrl(query)
-    };
-  }
-}
-
-/* ---------------- BUILD ASSET ---------------- */
-
-async function buildAsset(query) {
-  const q = String(query || "").trim();
-  const upper = q.toUpperCase();
-
-  if (isStock(q)) {
-    const found = stockData().find(s => s.ticker === upper);
-    const live = await getYahooStockData(upper);
-
-    const stock =
-      live ||
-      found || {
-        ticker: upper,
-        name: upper,
-        price: null,
-        change: 0,
-        volume: "N/A",
-        aiScore: 82,
-        trend: "Stock market watch",
-        risk: "Medium",
-        signal: "Watch"
-      };
-
-    const asset = {
-      type: "stock",
-      tag: "📊 STOCK",
-      name: stock.ticker,
-      label: stock.name,
-      price: stock.price ? `$${Number(stock.price).toLocaleString()}` : "Fetching...",
-      move: `${stock.change >= 0 ? "+" : ""}${stock.change}% • ${stock.trend}`,
-      aiScore: stock.aiScore,
-      momentum: Math.min(99, Math.max(50, Math.round(stock.aiScore + Number(stock.change || 0)))),
-      demand: Math.min(99, Math.max(55, Math.round(stock.aiScore - 2))),
-      risk: riskNumber(stock.risk),
-      reason: stock.trend,
-      source: live ? "Live Yahoo market data" : found ? "Stock backend" : "Ticker estimate",
-      url: yahooUrl(stock.ticker)
-    };
-
-    asset.matchupScore = scoreAsset(asset);
-    asset.actionSignal = getActionSignal(asset);
-
-    return asset;
-  }
-
-  if (isPokemon(q)) {
-    const found = pokemonData().find(
-      p =>
-        p.name.toLowerCase().includes(q.toLowerCase()) ||
-        q.toLowerCase().includes(p.name.toLowerCase().split(" ")[0])
-    );
-
-    const market = await getEbayMarketData(q);
-
-    const score = found ? found.aiScore : 84;
-    const change = found ? found.change : 7;
-
-    const asset = {
-      type: "pokemon",
-      tag: "💎 POKÉMON",
-      name: found ? found.name : q,
-      label: "Pokémon Card",
-      price: market.price || "Search Market",
-      move: `Trend Score: +${change}%`,
-      aiScore: score,
-      momentum: Math.min(99, Math.max(50, Math.round(score + change))),
-      demand:
-        found && found.demand === "Very Strong"
-          ? 96
-          : found && found.demand === "Strong"
-          ? 90
-          : 82,
-      risk: riskNumber(found ? found.risk : "Medium"),
-      reason: found
-        ? found.trend
-        : "Pokémon collectible demand, marketplace searches, and pricing interest are being analyzed.",
-      source: market.source,
-      url: market.url,
-      soldUrl: market.soldUrl,
-      activeListings: market.activeListings
-    };
-
-    asset.matchupScore = scoreAsset(asset);
-    asset.actionSignal = getActionSignal(asset);
-
-    return asset;
-  }
-
-  const market = await getEbayMarketData(q);
-
-  const asset = {
-    type: "card",
-    tag: "🃏 CARD",
-    name: q,
-    label: "Sports Card / Collectible",
-    price: market.price,
-    move: "Collector market watch",
-    aiScore: 82,
-    momentum: 78,
-    demand: 80,
-    risk: 52,
-    reason: "This card is evaluated by collector demand, market search strength, liquidity, and resale interest.",
-    source: market.source,
-    url: market.url,
-    soldUrl: market.soldUrl,
-    activeListings: market.activeListings
+  const matchup = {
+    title: `${stock.symbol} vs ${card.query}`,
+    stock,
+    card,
+    analysis,
+    updatedAt: new Date().toISOString()
   };
 
-  asset.matchupScore = scoreAsset(asset);
-  asset.actionSignal = getActionSignal(asset);
+  matchup.tiktok = buildTikTokScript(matchup);
 
-  return asset;
+  return matchup;
 }
-
-/* ---------------- ROUTES ---------------- */
 
 app.get("/", (req, res) => {
   res.json({
-    ok: true,
-    message: "Card Scanner Backend Running",
-    routes: ["/health", "/api/stocks-live", "/api/pokemon-movers", "/api/matchup"]
+    status: "AI Market Matchup Backend Running",
+    endpoints: [
+      "/api/health",
+      "/api/auto-matchups",
+      "/api/under-five",
+      "/api/matchup?stock=SOFI&card=Victor%20Wembanyama%20base%20card",
+      "/api/tiktok-idea"
+    ]
   });
 });
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true, message: "Backend healthy" });
-});
-
-app.get("/api/stocks-live", async (req, res) => {
-  const tickers = ["NVDA", "TSLA", "AAPL", "SMCI", "PLTR", "AMD", "MU"];
-
-  const liveResults = await Promise.all(
-    tickers.map(async ticker => {
-      const live = await getYahooStockData(ticker);
-      const fallback = stockData().find(s => s.ticker === ticker);
-      return live || fallback;
-    })
-  );
-
+app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
-    updated: new Date().toISOString(),
-    stocks: liveResults.filter(Boolean)
-  });
-});
-
-app.get("/api/pokemon-movers", (req, res) => {
-  res.json({
-    ok: true,
-    updated: new Date().toISOString(),
-    pokemon: pokemonData(),
-    movers: pokemonData(),
-    pricingType: "Pokémon backend + eBay estimate"
+    message: "Backend connected",
+    updatedAt: new Date().toISOString()
   });
 });
 
 app.get("/api/matchup", async (req, res) => {
   try {
-    const assetAQuery = req.query.assetA || "NVDA";
-    const assetBQuery = req.query.assetB || "Charizard PSA 10";
+    const stock = req.query.stock || "SOFI";
+    const card = req.query.card || "Victor Wembanyama base card";
 
-    const assetA = await buildAsset(assetAQuery);
-    const assetB = await buildAsset(assetBQuery);
-
-    const winner = assetA.matchupScore >= assetB.matchupScore ? assetA : assetB;
-    const loser = assetA.matchupScore >= assetB.matchupScore ? assetB : assetA;
-
-    const confidence = Math.min(
-      95,
-      Math.max(52, 50 + Math.abs(assetA.matchupScore - assetB.matchupScore) * 2)
-    );
-
-    res.json({
-      ok: true,
-      updated: new Date().toISOString(),
-      assetA,
-      assetB,
-      winner,
-      loser,
-      confidence,
-      decision: winner.actionSignal,
-      disclaimer: "Educational research only. Not financial advice."
-    });
+    const matchup = await buildMatchup(stock, card);
+    res.json(matchup);
   } catch (err) {
+    console.error(err);
     res.status(500).json({
-      ok: false,
-      error: "Matchup failed",
-      message: err.message
+      error: "Could not build matchup",
+      details: err.message
     });
   }
 });
 
-app.post("/scan", (req, res) => {
-  res.json({
-    ok: true,
-    message: "Scanner endpoint working",
-    card: {
-      player: "Shohei Ohtani",
-      year: "2018",
-      brand: "Topps",
-      confidence: 82
+app.get("/api/auto-matchups", async (req, res) => {
+  try {
+    const count = Math.min(Number(req.query.count || 6), 10);
+    const matchups = [];
+
+    for (let i = 0; i < count; i++) {
+      const stock = pickRandom(underFiveStocks);
+      const card = pickRandom(cardIdeas);
+
+      try {
+        const matchup = await buildMatchup(stock, card);
+        matchups.push(matchup);
+      } catch (innerErr) {
+        console.log("Skipped matchup:", innerErr.message);
+      }
     }
-  });
+
+    res.json({
+      updatedAt: new Date().toISOString(),
+      count: matchups.length,
+      matchups
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Could not generate auto matchups",
+      details: err.message
+    });
+  }
 });
 
-app.get("/value", (req, res) => {
-  res.json({
-    ok: true,
-    message: "Value endpoint working",
-    value: {
-      estimatedValue: "$225",
-      averageSale: "$211",
-      trend: "Uptrend"
+app.get("/api/under-five", async (req, res) => {
+  try {
+    const matchups = [];
+
+    for (let i = 0; i < 5; i++) {
+      const stock = pickRandom(underFiveStocks);
+      const card = pickRandom(cardIdeas);
+
+      try {
+        const matchup = await buildMatchup(stock, card);
+        if (matchup.stock.price <= 5 || matchup.card.averagePrice <= 10) {
+          matchups.push(matchup);
+        }
+      } catch (innerErr) {
+        console.log("Skipped under-five matchup:", innerErr.message);
+      }
     }
-  });
+
+    res.json({
+      updatedAt: new Date().toISOString(),
+      matchups
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Could not generate under-five ideas",
+      details: err.message
+    });
+  }
+});
+
+app.get("/api/tiktok-idea", async (req, res) => {
+  try {
+    const stock = req.query.stock || pickRandom(underFiveStocks);
+    const card = req.query.card || pickRandom(cardIdeas);
+
+    const matchup = await buildMatchup(stock, card);
+
+    res.json({
+      title: `Viral TikTok Idea: ${matchup.title}`,
+      matchup,
+      tiktok: matchup.tiktok
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: "Could not generate TikTok idea",
+      details: err.message
+    });
+  }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`AI Market Matchup backend running on port ${PORT}`);
 });
