@@ -10,6 +10,8 @@ const PORT = process.env.PORT || 3000;
 let ebayToken = null;
 let ebayTokenExpires = 0;
 
+/* ---------------- EBAY TOKEN ---------------- */
+
 async function getEbayToken() {
   if (ebayToken && Date.now() < ebayTokenExpires) return ebayToken;
 
@@ -35,8 +37,11 @@ async function getEbayToken() {
 
   ebayToken = data.access_token;
   ebayTokenExpires = Date.now() + (data.expires_in - 60) * 1000;
+
   return ebayToken;
 }
+
+/* ---------------- HELPERS ---------------- */
 
 function isStock(query) {
   return /^[A-Z]{1,5}$/.test(String(query).trim().toUpperCase());
@@ -60,10 +65,12 @@ function yahooUrl(ticker) {
 
 function riskNumber(risk) {
   const r = String(risk || "").toLowerCase();
+
   if (r.includes("high")) return 68;
   if (r.includes("medium-high")) return 60;
   if (r.includes("medium")) return 50;
   if (r.includes("low")) return 34;
+
   return 50;
 }
 
@@ -76,24 +83,191 @@ function scoreAsset(asset) {
   );
 }
 
+/* ---------------- LIVE YAHOO STOCK DATA ---------------- */
+
+async function getYahooStockData(ticker) {
+  try {
+    console.log("FETCHING LIVE STOCK:", ticker);
+
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5d&interval=1d`;
+
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0"
+      }
+    });
+
+    const data = await res.json();
+
+    if (
+      !data ||
+      !data.chart ||
+      !data.chart.result ||
+      !data.chart.result[0] ||
+      !data.chart.result[0].meta
+    ) {
+      return null;
+    }
+
+    const meta = data.chart.result[0].meta;
+
+    const price = Number(meta.regularMarketPrice);
+    const previous = Number(meta.chartPreviousClose || meta.previousClose);
+
+    if (!price || isNaN(price)) return null;
+
+    const change = previous
+      ? Number((((price - previous) / previous) * 100).toFixed(2))
+      : 0;
+
+    return {
+      ticker: ticker.toUpperCase(),
+      name: meta.longName || meta.shortName || meta.symbol || ticker.toUpperCase(),
+      price,
+      change,
+      volume: "Live",
+      aiScore: change >= 3 ? 90 : change >= 1 ? 86 : change >= 0 ? 82 : 74,
+      trend:
+        change >= 3
+          ? "Strong Uptrend"
+          : change >= 1
+          ? "Positive Momentum"
+          : change >= 0
+          ? "Market Watch"
+          : "Pullback",
+      risk: Math.abs(change) >= 5 ? "High" : Math.abs(change) >= 2 ? "Medium" : "Low",
+      signal:
+        change >= 3
+          ? "🔥 Momentum"
+          : change >= 1
+          ? "📈 Watch"
+          : change >= 0
+          ? "Hold"
+          : "⚠️ Pullback"
+    };
+  } catch (err) {
+    console.log("Yahoo stock fetch failed:", ticker, err.message);
+    return null;
+  }
+}
+
+/* ---------------- FALLBACK STOCK DATA ---------------- */
+
 function stockData() {
   return [
-    { ticker: "NVDA", name: "Nvidia", price: 912.5, change: 2.34, volume: "52M", aiScore: 96, trend: "Strong Uptrend", risk: "Medium", signal: "🔥 Strong Buy" },
-    { ticker: "TSLA", name: "Tesla", price: 178.22, change: -1.12, volume: "41M", aiScore: 78, trend: "Pullback", risk: "High", signal: "⚠️ Watch" },
-    { ticker: "AAPL", name: "Apple", price: 189.1, change: 0.45, volume: "30M", aiScore: 84, trend: "Stable Uptrend", risk: "Low", signal: "📈 Hold" },
-    { ticker: "SMCI", name: "Super Micro Computer", price: 950, change: 5.8, volume: "27M", aiScore: 91, trend: "Momentum", risk: "Medium-High", signal: "🚀 Momentum" },
-    { ticker: "PLTR", name: "Palantir", price: 24.85, change: 1.95, volume: "65M", aiScore: 88, trend: "AI Momentum", risk: "Medium", signal: "🔥 Hot" },
-    { ticker: "AMD", name: "AMD", price: 158.4, change: 1.35, volume: "48M", aiScore: 86, trend: "AI chip momentum", risk: "Medium", signal: "📈 Watch" }
+    {
+      ticker: "NVDA",
+      name: "Nvidia",
+      price: 912.5,
+      change: 2.34,
+      volume: "52M",
+      aiScore: 96,
+      trend: "Strong Uptrend",
+      risk: "Medium",
+      signal: "🔥 Strong Buy"
+    },
+    {
+      ticker: "TSLA",
+      name: "Tesla",
+      price: 178.22,
+      change: -1.12,
+      volume: "41M",
+      aiScore: 78,
+      trend: "Pullback",
+      risk: "High",
+      signal: "⚠️ Watch"
+    },
+    {
+      ticker: "AAPL",
+      name: "Apple",
+      price: 189.1,
+      change: 0.45,
+      volume: "30M",
+      aiScore: 84,
+      trend: "Stable Uptrend",
+      risk: "Low",
+      signal: "📈 Hold"
+    },
+    {
+      ticker: "SMCI",
+      name: "Super Micro Computer",
+      price: 950,
+      change: 5.8,
+      volume: "27M",
+      aiScore: 91,
+      trend: "Momentum",
+      risk: "Medium-High",
+      signal: "🚀 Momentum"
+    },
+    {
+      ticker: "PLTR",
+      name: "Palantir",
+      price: 24.85,
+      change: 1.95,
+      volume: "65M",
+      aiScore: 88,
+      trend: "AI Momentum",
+      risk: "Medium",
+      signal: "🔥 Hot"
+    },
+    {
+      ticker: "AMD",
+      name: "AMD",
+      price: 158.4,
+      change: 1.35,
+      volume: "48M",
+      aiScore: 86,
+      trend: "AI chip momentum",
+      risk: "Medium",
+      signal: "📈 Watch"
+    }
   ];
 }
 
+/* ---------------- POKEMON DATA ---------------- */
+
 function pokemonData() {
   return [
-    { name: "Charizard Base Set", price: 425, change: 18, volume: "High", aiScore: 94, score: 94, trend: "Icon collectible demand", risk: "Medium", signal: "🔥 Hot", demand: "Very Strong" },
-    { name: "Pikachu Promo", price: 89, change: 7, volume: "Medium", aiScore: 86, score: 86, trend: "Mainstream collector appeal", risk: "Medium", signal: "📈 Rising", demand: "Strong" },
-    { name: "Lugia Neo Genesis", price: 310, change: -4, volume: "Medium", aiScore: 76, score: 76, trend: "Cooling after recent demand", risk: "Medium", signal: "⚠️ Watch", demand: "Moderate" }
+    {
+      name: "Charizard Base Set",
+      price: 425,
+      change: 18,
+      volume: "High",
+      aiScore: 94,
+      score: 94,
+      trend: "Icon collectible demand",
+      risk: "Medium",
+      signal: "🔥 Hot",
+      demand: "Very Strong"
+    },
+    {
+      name: "Pikachu Promo",
+      price: 89,
+      change: 7,
+      volume: "Medium",
+      aiScore: 86,
+      score: 86,
+      trend: "Mainstream collector appeal",
+      risk: "Medium",
+      signal: "📈 Rising",
+      demand: "Strong"
+    },
+    {
+      name: "Lugia Neo Genesis",
+      price: 310,
+      change: -4,
+      volume: "Medium",
+      aiScore: 76,
+      score: 76,
+      trend: "Cooling after recent demand",
+      risk: "Medium",
+      signal: "⚠️ Watch",
+      demand: "Moderate"
+    }
   ];
 }
+
+/* ---------------- EBAY MARKET DATA ---------------- */
 
 async function getEbayMarketData(query) {
   try {
@@ -158,46 +332,55 @@ async function getEbayMarketData(query) {
   }
 }
 
+/* ---------------- BUILD MATCHUP ASSET ---------------- */
+
 async function buildAsset(query) {
   const q = String(query || "").trim();
   const upper = q.toUpperCase();
 
   if (isStock(q)) {
     const found = stockData().find(s => s.ticker === upper);
+    const live = await getYahooStockData(upper);
 
-    const stock = found || {
-      ticker: upper,
-      name: upper,
-      price: null,
-      change: 0,
-      volume: "N/A",
-      aiScore: 82,
-      trend: "Stock market watch",
-      risk: "Medium",
-      signal: "Watch"
-    };
+    const stock =
+      live ||
+      found || {
+        ticker: upper,
+        name: upper,
+        price: null,
+        change: 0,
+        volume: "N/A",
+        aiScore: 82,
+        trend: "Stock market watch",
+        risk: "Medium",
+        signal: "Watch"
+      };
 
     return {
       type: "stock",
       tag: "📊 STOCK",
       name: stock.ticker,
       label: stock.name,
-      price: stock.price ? `$${Number(stock.price).toLocaleString()}` : "Live Chart",
+      price: stock.price ? `$${Number(stock.price).toLocaleString()}` : "Fetching...",
       move: `${stock.change >= 0 ? "+" : ""}${stock.change}% • ${stock.trend}`,
       aiScore: stock.aiScore,
-      momentum: Math.min(99, Math.max(50, Math.round(stock.aiScore + Number(stock.change || 0)))),
+      momentum: Math.min(
+        99,
+        Math.max(50, Math.round(stock.aiScore + Number(stock.change || 0)))
+      ),
       demand: Math.min(99, Math.max(55, Math.round(stock.aiScore - 2))),
       risk: riskNumber(stock.risk),
       reason: stock.trend,
-      source: found ? "Stock backend" : "Ticker estimate",
+      source: live ? "Live Yahoo market data" : found ? "Stock backend" : "Ticker estimate",
       url: yahooUrl(stock.ticker)
     };
   }
 
   if (isPokemon(q)) {
-    const found = pokemonData().find(p =>
-      p.name.toLowerCase().includes(q.toLowerCase()) ||
-      q.toLowerCase().includes(p.name.toLowerCase().split(" ")[0])
+    const found = pokemonData().find(
+      p =>
+        p.name.toLowerCase().includes(q.toLowerCase()) ||
+        q.toLowerCase().includes(p.name.toLowerCase().split(" ")[0])
     );
 
     const market = await getEbayMarketData(q);
@@ -214,9 +397,16 @@ async function buildAsset(query) {
       move: `Trend Score: +${change}%`,
       aiScore: score,
       momentum: Math.min(99, Math.max(50, Math.round(score + change))),
-      demand: found && found.demand === "Very Strong" ? 96 : found && found.demand === "Strong" ? 90 : 82,
+      demand:
+        found && found.demand === "Very Strong"
+          ? 96
+          : found && found.demand === "Strong"
+          ? 90
+          : 82,
       risk: riskNumber(found ? found.risk : "Medium"),
-      reason: found ? found.trend : "Pokémon collectible demand, marketplace searches, and pricing interest are being analyzed.",
+      reason: found
+        ? found.trend
+        : "Pokémon collectible demand, marketplace searches, and pricing interest are being analyzed.",
       source: market.source,
       url: market.url,
       soldUrl: market.soldUrl,
@@ -237,13 +427,16 @@ async function buildAsset(query) {
     momentum: 78,
     demand: 80,
     risk: 52,
-    reason: "This card is evaluated by collector demand, market search strength, liquidity, and resale interest.",
+    reason:
+      "This card is evaluated by collector demand, market search strength, liquidity, and resale interest.",
     source: market.source,
     url: market.url,
     soldUrl: market.soldUrl,
     activeListings: market.activeListings
   };
 }
+
+/* ---------------- ROUTES ---------------- */
 
 app.get("/", (req, res) => {
   res.json({
@@ -254,14 +447,27 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true, message: "Backend healthy" });
+  res.json({
+    ok: true,
+    message: "Backend healthy"
+  });
 });
 
-app.get("/api/stocks-live", (req, res) => {
+app.get("/api/stocks-live", async (req, res) => {
+  const tickers = ["NVDA", "TSLA", "AAPL", "SMCI", "PLTR", "AMD", "MU"];
+
+  const liveResults = await Promise.all(
+    tickers.map(async ticker => {
+      const live = await getYahooStockData(ticker);
+      const fallback = stockData().find(s => s.ticker === ticker);
+      return live || fallback;
+    })
+  );
+
   res.json({
     ok: true,
     updated: new Date().toISOString(),
-    stocks: stockData()
+    stocks: liveResults.filter(Boolean)
   });
 });
 
