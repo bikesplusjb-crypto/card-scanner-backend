@@ -8,32 +8,129 @@ app.use(express.json({ limit: "25mb" }));
 
 const PORT = process.env.PORT || 3000;
 
-/* HOME TEST */
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "Front + Back Card Scanner Backend Running",
-    routes: [
-      "/health",
-      "/scan",
-      "/value",
-      "/api/pokemon-movers",
-      "/api/stocks-live"
-    ]
-  });
-});
+let ebayToken = null;
+let ebayTokenExpires = 0;
 
-/* HEALTH TEST */
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    message: "Backend healthy"
-  });
-});
+async function getEbayToken() {
+  if (ebayToken && Date.now() < ebayTokenExpires) return ebayToken;
 
-/* STOCKS LIVE - WORKING DATA */
-app.get("/api/stocks-live", (req, res) => {
-  const stocks = [
+  if (!process.env.EBAY_CLIENT_ID || !process.env.EBAY_CLIENT_SECRET) {
+    return null;
+  }
+
+  const auth = Buffer.from(
+    process.env.EBAY_CLIENT_ID + ":" + process.env.EBAY_CLIENT_SECRET
+  ).toString("base64");
+
+  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
+  });
+
+  const data = await res.json();
+
+  if (!data.access_token) return null;
+
+  ebayToken = data.access_token;
+  ebayTokenExpires = Date.now() + (data.expires_in - 60) * 1000;
+
+  return ebayToken;
+}
+
+function isStock(query) {
+  return /^[A-Z]{1,5}$/.test(String(query).trim().toUpperCase());
+}
+
+function isPokemon(query) {
+  return /pokemon|charizard|pikachu|lugia|mewtwo|mew|blastoise|venusaur|eevee|snorlax|psa|base set|promo|neo genesis/i.test(query);
+}
+
+function ebaySearchUrl(query) {
+  return "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(query);
+}
+
+function ebaySoldUrl(query) {
+  return ebaySearchUrl(query) + "&LH_Sold=1&LH_Complete=1";
+}
+
+function yahooUrl(ticker) {
+  return "https://finance.yahoo.com/quote/" + encodeURIComponent(ticker);
+}
+
+function scoreAsset(asset) {
+  return Math.round(
+    asset.aiScore * 0.35 +
+    asset.momentum * 0.25 +
+    asset.demand * 0.25 -
+    asset.risk * 0.15
+  );
+}
+
+async function getEbayMarketData(query) {
+  try {
+    const token = await getEbayToken();
+
+    if (!token) {
+      return {
+        source: "eBay search link",
+        price: "Market Search",
+        activeListings: "Search available",
+        soldAvg: null,
+        url: ebaySearchUrl(query),
+        soldUrl: ebaySoldUrl(query)
+      };
+    }
+
+    const url =
+      "https://api.ebay.com/buy/browse/v1/item_summary/search?q=" +
+      encodeURIComponent(query) +
+      "&limit=10";
+
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
+      }
+    });
+
+    const data = await res.json();
+    const items = data.itemSummaries || [];
+
+    const prices = items
+      .map(item => Number(item.price && item.price.value))
+      .filter(n => !isNaN(n) && n > 0);
+
+    const avg =
+      prices.length > 0
+        ? Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
+        : null;
+
+    return {
+      source: "eBay Browse API",
+      price: avg ? `$${avg.toLocaleString()}` : "Market Search",
+      activeListings: items.length,
+      soldAvg: null,
+      url: ebaySearchUrl(query),
+      soldUrl: ebaySoldUrl(query)
+    };
+  } catch (err) {
+    return {
+      source: "eBay fallback",
+      price: "Market Search",
+      activeListings: "Search available",
+      soldAvg: null,
+      url: ebaySearchUrl(query),
+      soldUrl: ebaySoldUrl(query)
+    };
+  }
+}
+
+function stockData() {
+  return [
     {
       ticker: "NVDA",
       name: "Nvidia",
@@ -70,7 +167,7 @@ app.get("/api/stocks-live", (req, res) => {
     {
       ticker: "SMCI",
       name: "Super Micro Computer",
-      price: 950.0,
+      price: 950,
       change: 5.8,
       volume: "27M",
       aiScore: 91,
@@ -90,25 +187,21 @@ app.get("/api/stocks-live", (req, res) => {
       signal: "🔥 Hot"
     }
   ];
+}
 
-  res.json({
-    ok: true,
-    updated: new Date().toISOString(),
-    stocks
-  });
-});
-
-/* POKEMON MOVERS */
-app.get("/api/pokemon-movers", (req, res) => {
-  const pokemon = [
+function pokemonData() {
+  return [
     {
       name: "Charizard Base Set",
       price: 425,
       change: 18,
       volume: "High",
       aiScore: 94,
-      trend: "Uptrend",
-      signal: "🔥 Hot"
+      score: 94,
+      trend: "Icon collectible demand",
+      risk: "Medium",
+      signal: "🔥 Hot",
+      demand: "Very Strong"
     },
     {
       name: "Pikachu Promo",
@@ -116,8 +209,11 @@ app.get("/api/pokemon-movers", (req, res) => {
       change: 7,
       volume: "Medium",
       aiScore: 86,
-      trend: "Rising",
-      signal: "📈 Rising"
+      score: 86,
+      trend: "Mainstream collector appeal",
+      risk: "Medium",
+      signal: "📈 Rising",
+      demand: "Strong"
     },
     {
       name: "Lugia Neo Genesis",
@@ -125,20 +221,180 @@ app.get("/api/pokemon-movers", (req, res) => {
       change: -4,
       volume: "Medium",
       aiScore: 76,
-      trend: "Cooling",
-      signal: "⚠️ Watch"
+      score: 76,
+      trend: "Cooling after recent demand",
+      risk: "Medium",
+      signal: "⚠️ Watch",
+      demand: "Moderate"
     }
   ];
+}
 
+function riskNumber(risk) {
+  const r = String(risk || "").toLowerCase();
+  if (r.includes("high")) return 68;
+  if (r.includes("medium-high")) return 60;
+  if (r.includes("medium")) return 50;
+  if (r.includes("low")) return 34;
+  return 50;
+}
+
+async function buildAsset(query) {
+  const q = String(query || "").trim();
+  const upper = q.toUpperCase();
+
+  if (isStock(q)) {
+    const found = stockData().find(s => s.ticker === upper);
+
+    const stock = found || {
+      ticker: upper,
+      name: upper,
+      price: null,
+      change: 0,
+      volume: "N/A",
+      aiScore: 82,
+      trend: "Stock market watch",
+      risk: "Medium",
+      signal: "Watch"
+    };
+
+    return {
+      type: "stock",
+      tag: "📊 STOCK",
+      name: stock.ticker,
+      label: stock.name,
+      price: stock.price ? `$${Number(stock.price).toLocaleString()}` : "Live Chart",
+      move: `${stock.change >= 0 ? "+" : ""}${stock.change}% • ${stock.trend}`,
+      aiScore: stock.aiScore,
+      momentum: Math.min(99, Math.max(50, Math.round(stock.aiScore + Number(stock.change || 0)))),
+      demand: Math.min(99, Math.max(55, Math.round(stock.aiScore - 2))),
+      risk: riskNumber(stock.risk),
+      reason: stock.trend,
+      source: found ? "Stock backend" : "Ticker estimate",
+      url: yahooUrl(stock.ticker)
+    };
+  }
+
+  if (isPokemon(q)) {
+    const found = pokemonData().find(p =>
+      p.name.toLowerCase().includes(q.toLowerCase()) ||
+      q.toLowerCase().includes(p.name.toLowerCase().split(" ")[0])
+    );
+
+    const market = await getEbayMarketData(q);
+
+    const score = found ? found.aiScore : 84;
+    const change = found ? found.change : 7;
+
+    return {
+      type: "pokemon",
+      tag: "💎 POKÉMON",
+      name: found ? found.name : q,
+      label: "Pokémon Card",
+      price: market.price || (found ? `$${found.price}` : "Market Search"),
+      move: `Trend Score: +${change}%`,
+      aiScore: score,
+      momentum: Math.min(99, Math.max(50, Math.round(score + change))),
+      demand: found && found.demand === "Very Strong" ? 96 : found && found.demand === "Strong" ? 90 : 82,
+      risk: riskNumber(found ? found.risk : "Medium"),
+      reason: found ? found.trend : "Pokémon collectible demand, market searches, and pricing interest are being analyzed.",
+      source: market.source,
+      url: market.url,
+      soldUrl: market.soldUrl,
+      activeListings: market.activeListings
+    };
+  }
+
+  const market = await getEbayMarketData(q);
+
+  return {
+    type: "card",
+    tag: "🃏 CARD",
+    name: q,
+    label: "Sports Card / Collectible",
+    price: market.price,
+    move: "Collector market watch",
+    aiScore: 82,
+    momentum: 78,
+    demand: 80,
+    risk: 52,
+    reason: "This card is evaluated by collector demand, market search strength, liquidity, and resale interest.",
+    source: market.source,
+    url: market.url,
+    soldUrl: market.soldUrl,
+    activeListings: market.activeListings
+  };
+}
+
+app.get("/", (req, res) => {
   res.json({
     ok: true,
-    updated: new Date().toISOString(),
-    pokemon
+    message: "Card Scanner Backend Running",
+    routes: ["/health", "/api/stocks-live", "/api/pokemon-movers", "/api/matchup"]
   });
 });
 
-/* CARD SCAN PLACEHOLDER */
-app.post("/scan", async (req, res) => {
+app.get("/health", (req, res) => {
+  res.json({ ok: true, message: "Backend healthy" });
+});
+
+app.get("/api/stocks-live", (req, res) => {
+  res.json({
+    ok: true,
+    updated: new Date().toISOString(),
+    stocks: stockData()
+  });
+});
+
+app.get("/api/pokemon-movers", (req, res) => {
+  res.json({
+    ok: true,
+    updated: new Date().toISOString(),
+    pokemon: pokemonData(),
+    movers: pokemonData(),
+    pricingType: "Pokémon backend + eBay search links"
+  });
+});
+
+app.get("/api/matchup", async (req, res) => {
+  try {
+    const assetAQuery = req.query.assetA || "NVDA";
+    const assetBQuery = req.query.assetB || "Charizard PSA 10";
+
+    const assetA = await buildAsset(assetAQuery);
+    const assetB = await buildAsset(assetBQuery);
+
+    assetA.matchupScore = scoreAsset(assetA);
+    assetB.matchupScore = scoreAsset(assetB);
+
+    const winner = assetA.matchupScore >= assetB.matchupScore ? assetA : assetB;
+    const loser = assetA.matchupScore >= assetB.matchupScore ? assetB : assetA;
+
+    const confidence = Math.min(
+      95,
+      Math.max(52, 50 + Math.abs(assetA.matchupScore - assetB.matchupScore) * 2)
+    );
+
+    res.json({
+      ok: true,
+      updated: new Date().toISOString(),
+      assetA,
+      assetB,
+      winner,
+      loser,
+      confidence,
+      disclaimer: "Educational research only. Not financial advice."
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      error: "Matchup failed",
+      message: err.message
+    });
+  }
+});
+
+app.post("/scan", (req, res) => {
   res.json({
     ok: true,
     message: "Scanner endpoint working",
@@ -146,13 +402,11 @@ app.post("/scan", async (req, res) => {
       player: "Shohei Ohtani",
       year: "2018",
       brand: "Topps",
-      cardNumber: "US1",
       confidence: 82
     }
   });
 });
 
-/* VALUE PLACEHOLDER */
 app.get("/value", (req, res) => {
   res.json({
     ok: true,
