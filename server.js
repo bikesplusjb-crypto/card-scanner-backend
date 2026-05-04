@@ -332,9 +332,8 @@ app.get("/value", async (req, res) => {
   }
 });
 
-/* NEW POKEMON MOVERS API */
-app.get("/api/pokemon-movers", async (req, res) => {
-  res.json({
+app.get("/api/pokemon-movers", (req, res) => {
+  return res.status(200).json({
     ok: true,
     updated: new Date().toISOString(),
     movers: [
