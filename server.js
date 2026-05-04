@@ -4,17 +4,28 @@ app.get("/api/stocks-live", async (req, res) => {
       .toUpperCase()
       .replace(/\s/g, "");
 
-    const url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + encodeURIComponent(symbols);
+    const url =
+      "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" +
+      encodeURIComponent(symbols);
 
     const r = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0" }
+      headers: {
+        "User-Agent": "Mozilla/5.0"
+      }
     });
 
     const data = await r.json();
-    const results = data?.quoteResponse?.result || [];
+
+    const results =
+      data &&
+      data.quoteResponse &&
+      data.quoteResponse.result
+        ? data.quoteResponse.result
+        : [];
 
     const stocks = results.map(s => {
       const price = Number(s.regularMarketPrice || 0);
+      const change = Number(s.regularMarketChange || 0);
       const changePct = Number(s.regularMarketChangePercent || 0);
 
       let signal = "WATCH";
@@ -35,17 +46,17 @@ app.get("/api/stocks-live", async (req, res) => {
       }
 
       return {
-        symbol: s.symbol,
-        name: s.shortName || s.longName || s.symbol,
-        price,
-        change: Number((s.regularMarketChange || 0).toFixed(2)),
+        symbol: s.symbol || "",
+        name: s.shortName || s.longName || s.symbol || "",
+        price: Number(price.toFixed(2)),
+        change: Number(change.toFixed(2)),
         changePct: Number(changePct.toFixed(2)),
         volume: s.regularMarketVolume || 0,
         marketCap: s.marketCap || null,
         signal,
         risk,
         score,
-        chartUrl: `https://finance.yahoo.com/quote/${s.symbol}`
+        chartUrl: "https://finance.yahoo.com/quote/" + encodeURIComponent(s.symbol || "")
       };
     });
 
@@ -55,6 +66,8 @@ app.get("/api/stocks-live", async (req, res) => {
       stocks
     });
   } catch (err) {
+    console.error("STOCK LIVE API ERROR:", err.message);
+
     res.status(500).json({
       ok: false,
       error: "Live stock API failed",
