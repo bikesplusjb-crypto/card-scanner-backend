@@ -37,7 +37,6 @@ async function getEbayToken() {
 
   ebayToken = data.access_token;
   ebayTokenExpires = Date.now() + (data.expires_in - 60) * 1000;
-
   return ebayToken;
 }
 
@@ -65,12 +64,10 @@ function yahooUrl(ticker) {
 
 function riskNumber(risk) {
   const r = String(risk || "").toLowerCase();
-
   if (r.includes("high")) return 68;
   if (r.includes("medium-high")) return 60;
   if (r.includes("medium")) return 50;
   if (r.includes("low")) return 34;
-
   return 50;
 }
 
@@ -83,18 +80,45 @@ function scoreAsset(asset) {
   );
 }
 
+/* ---------------- BUY / WAIT / AVOID LOGIC ---------------- */
+
+function getActionSignal(asset) {
+  const score = Number(asset.matchupScore || 0);
+  const momentum = Number(asset.momentum || 0);
+  const risk = Number(asset.risk || 50);
+  const demand = Number(asset.demand || 0);
+
+  if (score >= 75 && momentum >= 80 && demand >= 80 && risk <= 55) {
+    return {
+      action: "BUY",
+      color: "green",
+      reason: "Strong momentum, high demand, and acceptable risk."
+    };
+  }
+
+  if (score >= 64 && momentum >= 70 && risk <= 65) {
+    return {
+      action: "WAIT",
+      color: "yellow",
+      reason: "Good setup, but risk or momentum needs confirmation."
+    };
+  }
+
+  return {
+    action: "AVOID",
+    color: "red",
+    reason: "Risk is too high or momentum is not strong enough."
+  };
+}
+
 /* ---------------- LIVE YAHOO STOCK DATA ---------------- */
 
 async function getYahooStockData(ticker) {
   try {
-    console.log("FETCHING LIVE STOCK:", ticker);
-
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5d&interval=1d`;
 
     const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0"
-      }
+      headers: { "User-Agent": "Mozilla/5.0" }
     });
 
     const data = await res.json();
@@ -110,7 +134,6 @@ async function getYahooStockData(ticker) {
     }
 
     const meta = data.chart.result[0].meta;
-
     const price = Number(meta.regularMarketPrice);
     const previous = Number(meta.chartPreviousClose || meta.previousClose);
 
@@ -155,72 +178,12 @@ async function getYahooStockData(ticker) {
 
 function stockData() {
   return [
-    {
-      ticker: "NVDA",
-      name: "Nvidia",
-      price: 912.5,
-      change: 2.34,
-      volume: "52M",
-      aiScore: 96,
-      trend: "Strong Uptrend",
-      risk: "Medium",
-      signal: "🔥 Strong Buy"
-    },
-    {
-      ticker: "TSLA",
-      name: "Tesla",
-      price: 178.22,
-      change: -1.12,
-      volume: "41M",
-      aiScore: 78,
-      trend: "Pullback",
-      risk: "High",
-      signal: "⚠️ Watch"
-    },
-    {
-      ticker: "AAPL",
-      name: "Apple",
-      price: 189.1,
-      change: 0.45,
-      volume: "30M",
-      aiScore: 84,
-      trend: "Stable Uptrend",
-      risk: "Low",
-      signal: "📈 Hold"
-    },
-    {
-      ticker: "SMCI",
-      name: "Super Micro Computer",
-      price: 950,
-      change: 5.8,
-      volume: "27M",
-      aiScore: 91,
-      trend: "Momentum",
-      risk: "Medium-High",
-      signal: "🚀 Momentum"
-    },
-    {
-      ticker: "PLTR",
-      name: "Palantir",
-      price: 24.85,
-      change: 1.95,
-      volume: "65M",
-      aiScore: 88,
-      trend: "AI Momentum",
-      risk: "Medium",
-      signal: "🔥 Hot"
-    },
-    {
-      ticker: "AMD",
-      name: "AMD",
-      price: 158.4,
-      change: 1.35,
-      volume: "48M",
-      aiScore: 86,
-      trend: "AI chip momentum",
-      risk: "Medium",
-      signal: "📈 Watch"
-    }
+    { ticker: "NVDA", name: "Nvidia", price: 912.5, change: 2.34, volume: "52M", aiScore: 96, trend: "Strong Uptrend", risk: "Medium", signal: "🔥 Strong Buy" },
+    { ticker: "TSLA", name: "Tesla", price: 178.22, change: -1.12, volume: "41M", aiScore: 78, trend: "Pullback", risk: "High", signal: "⚠️ Watch" },
+    { ticker: "AAPL", name: "Apple", price: 189.1, change: 0.45, volume: "30M", aiScore: 84, trend: "Stable Uptrend", risk: "Low", signal: "📈 Hold" },
+    { ticker: "SMCI", name: "Super Micro Computer", price: 950, change: 5.8, volume: "27M", aiScore: 91, trend: "Momentum", risk: "Medium-High", signal: "🚀 Momentum" },
+    { ticker: "PLTR", name: "Palantir", price: 24.85, change: 1.95, volume: "65M", aiScore: 88, trend: "AI Momentum", risk: "Medium", signal: "🔥 Hot" },
+    { ticker: "AMD", name: "AMD", price: 158.4, change: 1.35, volume: "48M", aiScore: 86, trend: "AI chip momentum", risk: "Medium", signal: "📈 Watch" }
   ];
 }
 
@@ -228,42 +191,9 @@ function stockData() {
 
 function pokemonData() {
   return [
-    {
-      name: "Charizard Base Set",
-      price: 425,
-      change: 18,
-      volume: "High",
-      aiScore: 94,
-      score: 94,
-      trend: "Icon collectible demand",
-      risk: "Medium",
-      signal: "🔥 Hot",
-      demand: "Very Strong"
-    },
-    {
-      name: "Pikachu Promo",
-      price: 89,
-      change: 7,
-      volume: "Medium",
-      aiScore: 86,
-      score: 86,
-      trend: "Mainstream collector appeal",
-      risk: "Medium",
-      signal: "📈 Rising",
-      demand: "Strong"
-    },
-    {
-      name: "Lugia Neo Genesis",
-      price: 310,
-      change: -4,
-      volume: "Medium",
-      aiScore: 76,
-      score: 76,
-      trend: "Cooling after recent demand",
-      risk: "Medium",
-      signal: "⚠️ Watch",
-      demand: "Moderate"
-    }
+    { name: "Charizard Base Set", price: 425, change: 18, volume: "High", aiScore: 94, score: 94, trend: "Icon collectible demand", risk: "Medium", signal: "🔥 Hot", demand: "Very Strong" },
+    { name: "Pikachu Promo", price: 89, change: 7, volume: "Medium", aiScore: 86, score: 86, trend: "Mainstream collector appeal", risk: "Medium", signal: "📈 Rising", demand: "Strong" },
+    { name: "Lugia Neo Genesis", price: 310, change: -4, volume: "Medium", aiScore: 76, score: 76, trend: "Cooling after recent demand", risk: "Medium", signal: "⚠️ Watch", demand: "Moderate" }
   ];
 }
 
@@ -305,9 +235,7 @@ async function getEbayMarketData(query) {
     prices = prices.sort((a, b) => a - b);
 
     let cleaned = prices;
-    if (prices.length >= 6) {
-      cleaned = prices.slice(1, -1);
-    }
+    if (prices.length >= 6) cleaned = prices.slice(1, -1);
 
     const avg =
       cleaned.length > 0
@@ -332,7 +260,7 @@ async function getEbayMarketData(query) {
   }
 }
 
-/* ---------------- BUILD MATCHUP ASSET ---------------- */
+/* ---------------- BUILD ASSET ---------------- */
 
 async function buildAsset(query) {
   const q = String(query || "").trim();
@@ -356,7 +284,7 @@ async function buildAsset(query) {
         signal: "Watch"
       };
 
-    return {
+    const asset = {
       type: "stock",
       tag: "📊 STOCK",
       name: stock.ticker,
@@ -364,16 +292,18 @@ async function buildAsset(query) {
       price: stock.price ? `$${Number(stock.price).toLocaleString()}` : "Fetching...",
       move: `${stock.change >= 0 ? "+" : ""}${stock.change}% • ${stock.trend}`,
       aiScore: stock.aiScore,
-      momentum: Math.min(
-        99,
-        Math.max(50, Math.round(stock.aiScore + Number(stock.change || 0)))
-      ),
+      momentum: Math.min(99, Math.max(50, Math.round(stock.aiScore + Number(stock.change || 0)))),
       demand: Math.min(99, Math.max(55, Math.round(stock.aiScore - 2))),
       risk: riskNumber(stock.risk),
       reason: stock.trend,
       source: live ? "Live Yahoo market data" : found ? "Stock backend" : "Ticker estimate",
       url: yahooUrl(stock.ticker)
     };
+
+    asset.matchupScore = scoreAsset(asset);
+    asset.actionSignal = getActionSignal(asset);
+
+    return asset;
   }
 
   if (isPokemon(q)) {
@@ -388,7 +318,7 @@ async function buildAsset(query) {
     const score = found ? found.aiScore : 84;
     const change = found ? found.change : 7;
 
-    return {
+    const asset = {
       type: "pokemon",
       tag: "💎 POKÉMON",
       name: found ? found.name : q,
@@ -412,11 +342,16 @@ async function buildAsset(query) {
       soldUrl: market.soldUrl,
       activeListings: market.activeListings
     };
+
+    asset.matchupScore = scoreAsset(asset);
+    asset.actionSignal = getActionSignal(asset);
+
+    return asset;
   }
 
   const market = await getEbayMarketData(q);
 
-  return {
+  const asset = {
     type: "card",
     tag: "🃏 CARD",
     name: q,
@@ -427,13 +362,17 @@ async function buildAsset(query) {
     momentum: 78,
     demand: 80,
     risk: 52,
-    reason:
-      "This card is evaluated by collector demand, market search strength, liquidity, and resale interest.",
+    reason: "This card is evaluated by collector demand, market search strength, liquidity, and resale interest.",
     source: market.source,
     url: market.url,
     soldUrl: market.soldUrl,
     activeListings: market.activeListings
   };
+
+  asset.matchupScore = scoreAsset(asset);
+  asset.actionSignal = getActionSignal(asset);
+
+  return asset;
 }
 
 /* ---------------- ROUTES ---------------- */
@@ -447,10 +386,7 @@ app.get("/", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    message: "Backend healthy"
-  });
+  res.json({ ok: true, message: "Backend healthy" });
 });
 
 app.get("/api/stocks-live", async (req, res) => {
@@ -489,9 +425,6 @@ app.get("/api/matchup", async (req, res) => {
     const assetA = await buildAsset(assetAQuery);
     const assetB = await buildAsset(assetBQuery);
 
-    assetA.matchupScore = scoreAsset(assetA);
-    assetB.matchupScore = scoreAsset(assetB);
-
     const winner = assetA.matchupScore >= assetB.matchupScore ? assetA : assetB;
     const loser = assetA.matchupScore >= assetB.matchupScore ? assetB : assetA;
 
@@ -508,6 +441,7 @@ app.get("/api/matchup", async (req, res) => {
       winner,
       loser,
       confidence,
+      decision: winner.actionSignal,
       disclaimer: "Educational research only. Not financial advice."
     });
   } catch (err) {
