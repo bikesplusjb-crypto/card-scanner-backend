@@ -1,106 +1,195 @@
-<script>
-const API_URL = "https://card-scanner-backend-2frn.onrender.com/api/pokemon-movers";
+app.get("/api/pokemon-movers", async (req, res) => {
+  const watchlist = [
+    { name: "Charizard Base Set PSA 10", set: "Base Set", fallback: 13500 },
+    { name: "Pikachu Van Gogh", set: "Promo", fallback: 185 },
+    { name: "Umbreon VMAX Alt Art", set: "Evolving Skies", fallback: 850 },
+    { name: "Lugia V Alt Art", set: "Silver Tempest", fallback: 165 },
+    { name: "Moonbreon PSA 10", set: "Evolving Skies", fallback: 1450 }
+  ];
 
-const app = document.getElementById("pokemonApp");
+  function median(values) {
+    if (!values.length) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2
+      ? sorted[mid]
+      : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
 
-// Loading state
-app.innerHTML = `
-  <div style="color:white;padding:40px;text-align:center;font-size:20px;">
-    🚀 Loading Live Pokémon Market...
-  </div>
-`;
+  function removeOutliers(prices) {
+    if (prices.length < 4) return prices;
+    const sorted = [...prices].sort((a, b) => a - b);
+    const q1 = sorted[Math.floor(sorted.length * 0.25)];
+    const q3 = sorted[Math.floor(sorted.length * 0.75)];
+    const iqr = q3 - q1;
+    const low = q1 - iqr * 1.5;
+    const high = q3 + iqr * 1.5;
+    return sorted.filter(p => p >= low && p <= high);
+  }
 
-function ebayActive(name){
-  return "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(name);
-}
+  function confidenceFromCount(count) {
+    if (count >= 20) return "High";
+    if (count >= 8) return "Medium";
+    if (count >= 3) return "Low-Medium";
+    return "Low";
+  }
 
-function ebaySold(name){
-  return "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(name) + "&LH_Sold=1&LH_Complete=1";
-}
+  function demandFromCount(count) {
+    if (count >= 20) return "Very Strong";
+    if (count >= 10) return "Strong";
+    if (count >= 5) return "Moderate";
+    if (count >= 1) return "Thin";
+    return "No recent data";
+  }
 
-fetch(API_URL)
-  .then(res => res.json())
-  .then(data => {
+  async function getActiveComps(token, query) {
+    const ebayUrl =
+      "https://api.ebay.com/buy/browse/v1/item_summary/search" +
+      `?q=${encodeURIComponent(query)}` +
+      "&category_ids=183454" +
+      "&limit=50" +
+      "&filter=price:[1..50000],priceCurrency:USD";
 
-    if(!data.ok){
-      throw new Error("API error");
-    }
+    const ebayRes = await fetch(ebayUrl, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
+      }
+    });
 
-    app.innerHTML = `
-      <div style="font-family:Arial;background:#020617;color:white;padding:24px;border-radius:20px;">
-        
-        <h1>🔥 Pokémon Market Tracker</h1>
-        <p style="color:#22c55e;">Live Pricing Connected ✅</p>
-        <p style="color:#94a3b8;font-size:13px;">
-          ${data.pricingType || ""}
-        </p>
+    const ebayData = await ebayRes.json();
+    const items = ebayData.itemSummaries || [];
 
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-top:18px;">
-          
-          ${data.movers.map(card => `
-            <div style="
-              background:#0f172a;
-              padding:20px;
-              border-radius:18px;
-              border:1px solid #334155;
-              box-shadow:0 10px 25px rgba(0,0,0,.3);
-              transition:.2s;
-            "
-            onmouseover="this.style.transform='scale(1.03)'"
-            onmouseout="this.style.transform='scale(1)'"
-            >
+    const rawPrices = items
+      .map(moneyToNumber)
+      .filter(n => n && n > 0 && n < 50000);
 
-              <h2 style="margin:0 0 6px;">${card.name}</h2>
-              <p style="color:#94a3b8;margin-bottom:10px;">${card.set}</p>
+    const prices = removeOutliers(rawPrices);
+    const stats = calcStats(prices);
 
-              <h3 style="margin:0;">$${Number(card.price).toLocaleString()}</h3>
+    return {
+      type: "active_listing_estimate",
+      average: stats.average,
+      median: median(prices) ? Number(median(prices).toFixed(2)) : null,
+      low: stats.low,
+      high: stats.high,
+      count: stats.count,
+      rawCount: rawPrices.length
+    };
+  }
 
-              <p style="color:${card.change > 0 ? '#22c55e' : '#ef4444'};font-weight:800;">
-                Trend Score: ${card.change}%
-              </p>
+  async function getSoldCompsPlaceholder(query) {
+    // Placeholder until you get true eBay Marketplace Insights access
+    // or add a paid sold-comps provider.
+    return {
+      type: "sold_comps_not_connected",
+      average: null,
+      median: null,
+      low: null,
+      high: null,
+      count: 0,
+      note: "True sold comps require eBay Marketplace Insights access or a sold-comps data provider."
+    };
+  }
 
-              <p><b>${card.signal}</b> | AI Score: ${card.score}</p>
-              <p style="color:#facc15;">Risk: ${card.risk}</p>
+  try {
+    const token = await getEbayToken();
 
-              <p style="font-size:13px;color:#94a3b8;">
-                ${card.reason}
-              </p>
+    const movers = await Promise.all(
+      watchlist.map(async card => {
+        const query = `${card.name} pokemon card`;
 
-              <div style="font-size:13px;margin-top:8px;">
-                📊 Listings: ${card.volume || "N/A"}<br>
-                💰 Range: $${card.low || "?"} - $${card.high || "?"}
-              </div>
+        const active = await getActiveComps(token, query);
+        const sold = await getSoldCompsPlaceholder(query);
 
-              <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
-                
-                <a target="_blank"
-                   href="${ebayActive(card.name)}"
-                   style="background:#22c55e;color:#03120a;padding:10px 12px;border-radius:10px;text-decoration:none;font-weight:800;">
-                   Live Listings
-                </a>
+        const activeAvg = active.average || card.fallback;
+        const soldAvg = sold.average || null;
 
-                <a target="_blank"
-                   href="${ebaySold(card.name)}"
-                   style="background:#38bdf8;color:#031827;padding:10px 12px;border-radius:10px;text-decoration:none;font-weight:800;">
-                   Sold Data
-                </a>
+        const marketPrice = soldAvg || activeAvg;
+        const demand = demandFromCount(active.count);
+        const confidence = confidenceFromCount(active.count);
 
-              </div>
+        let signal = "WATCH";
+        let risk = "Medium";
+        let score = 72;
 
-            </div>
-          `).join("")}
+        if (active.count >= 10) {
+          signal = "HOLD";
+          score = 82;
+        }
 
-        </div>
+        if (active.count >= 20) {
+          signal = "BUY";
+          score = 90;
+        }
 
-      </div>
-    `;
-  })
-  .catch((err) => {
-    app.innerHTML = `
-      <div style="color:red;padding:40px;">
-        ❌ Failed to load Pokémon data<br>
-        ${err.message}
-      </div>
-    `;
-  });
-</script>
+        if (marketPrice > card.fallback * 1.25) {
+          risk = "Medium-High";
+          score += 3;
+        }
+
+        if (active.count <= 3) {
+          risk = "Thin Market";
+          score = 68;
+        }
+
+        const trend = active.count >= 20 ? 8.5 : active.count >= 10 ? 5.2 : active.count >= 5 ? 2.8 : 1.2;
+
+        return {
+          name: card.name,
+          set: card.set,
+
+          price: Number(marketPrice.toFixed(2)),
+          activeAvg: active.average,
+          activeMedian: active.median,
+          activeLow: active.low,
+          activeHigh: active.high,
+          activeVolume: active.count,
+
+          soldAvg,
+          soldMedian: sold.median,
+          soldLow: sold.low,
+          soldHigh: sold.high,
+          soldVolume: sold.count,
+
+          low: active.low,
+          high: active.high,
+          volume: active.count,
+
+          demand,
+          confidence,
+          change: trend,
+          signal,
+          score: Math.min(score, 98),
+          risk,
+
+          reason:
+            soldAvg
+              ? `Sold comps show ${sold.count} recent sales. Active listings show ${active.count} listings.`
+              : `Active listings show ${active.count} current listings. Sold comps are ready but not connected yet.`,
+
+          pricingSource:
+            soldAvg ? "Sold comps + active listings" : "Active listings only",
+
+          activeUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}`,
+          soldUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&LH_Sold=1&LH_Complete=1`
+        };
+      })
+    );
+
+    res.json({
+      ok: true,
+      pricingType: "Sold-comps ready engine; active eBay estimate currently connected",
+      updated: new Date().toISOString(),
+      movers
+    });
+  } catch (err) {
+    console.error("POKEMON COMPS ERROR:", err.message);
+
+    res.status(500).json({
+      ok: false,
+      error: "Pokemon comps engine failed",
+      details: err.message
+    });
+  }
+});
