@@ -32,110 +32,16 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-async function getEbayToken() {
-  if (ebayToken && Date.now() < ebayTokenExpires) return ebayToken;
+function safeJson(text) {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1) return null;
 
-  const id = process.env.EBAY_CLIENT_ID;
-  const secret = process.env.EBAY_CLIENT_SECRET;
-
-  if (!id || !secret) return null;
-
-  const auth = Buffer.from(`${id}:${secret}`).toString("base64");
-
-  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
-  });
-
-  const data = await res.json();
-
-  if (!data.access_token) {
-    console.log("eBay token error:", data);
-    return null;
-  }
-
-  ebayToken = data.access_token;
-  ebayTokenExpires = Date.now() + (data.expires_in - 60) * 1000;
-  return ebayToken;
-}
-
-async function getEbayAverage(query) {
   try {
-    const token = await getEbayToken();
-    if (!token) return null;
-
-    const url =
-      "https://api.ebay.com/buy/browse/v1/item_summary/search?q=" +
-      encodeURIComponent(query) +
-      "&limit=10";
-
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
-      }
-    });
-
-    const data = await res.json();
-    const items = data.itemSummaries || [];
-
-    const prices = items
-      .map(i => Number(i.price?.value))
-      .filter(n => !isNaN(n) && n > 0);
-
-    if (!prices.length) return null;
-
-    const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
-
-    return {
-      averagePrice: avg.toFixed(2),
-      listingsFound: prices.length,
-      ebayUrl:
-        "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(query)
-    };
-  } catch (err) {
-    console.log("eBay average error:", err.message);
+    return JSON.parse(text.slice(start, end + 1));
+  } catch {
     return null;
   }
-}
-
-function fallbackCard(front) {
-  const file = (front?.originalname || "").toLowerCase();
-
-  if (file.includes("charizard")) return "Charizard Pokémon Card";
-  if (file.includes("pikachu")) return "Pikachu Pokémon Card";
-  if (file.includes("ohtani")) return "Shohei Ohtani Rookie Card";
-  if (file.includes("wembanyama") || file.includes("wemby")) return "Victor Wembanyama Rookie Card";
-  if (file.includes("mahomes")) return "Patrick Mahomes Rookie Card";
-
-  return "Unknown Trading Card";
-}
-
-function scoreCard(name) {
-  const n = name.toLowerCase();
-
-  if (
-    n.includes("charizard") ||
-    n.includes("pikachu") ||
-    n.includes("ohtani") ||
-    n.includes("wembanyama") ||
-    n.includes("mahomes")
-  ) return 91;
-
-  if (n.includes("rookie") || n.includes("pokemon") || n.includes("pokémon") || n.includes("psa")) return 84;
-
-  return 76;
-}
-
-function signal(score) {
-  if (score >= 90) return "🔥 HOT";
-  if (score >= 80) return "📈 RISING";
-  if (score >= 70) return "👀 WATCH";
-  return "⚠️ LOW SIGNAL";
 }
 
 async function detectCard(front, back) {
@@ -144,19 +50,35 @@ async function detectCard(front, back) {
   const content = [
     {
       type: "input_text",
-      text: `Identify this trading card from the images.
+      text: `
+You are an expert sports card, Pokémon card, and trading card identifier.
 
-Return ONLY valid JSON:
+Analyze the uploaded card image(s).
+
+Return ONLY valid JSON. No markdown. No explanation.
+
+Use this exact structure:
 {
   "name": "full card name",
-  "brand": "brand if visible",
-  "year": "year if visible",
-  "set": "set if visible",
+  "playerOrCharacter": "player or Pokemon name",
+  "sportOrCategory": "baseball / basketball / football / pokemon / other",
+  "year": "year if visible or likely",
+  "brand": "Topps / Panini / Bowman / Pokemon / etc",
+  "set": "set name if visible",
   "cardNumber": "card number if visible",
-  "confidence": 0-100,
+  "variant": "rookie / refractor / holo / reverse holo / base / unknown",
   "gradeHint": "Raw / PSA candidate / unclear",
-  "reason": "short reason"
-}`
+  "confidence": 0,
+  "conditionNotes": "short condition note",
+  "reason": "short reason for identification"
+}
+
+Rules:
+- If unsure, use best guess but lower confidence.
+- Back image may contain year, set, card number, and brand.
+- Do not invent exact card number unless visible.
+- For Pokémon, identify character and likely card type.
+      `
     },
     {
       type: "input_image",
@@ -171,37 +93,176 @@ Return ONLY valid JSON:
     });
   }
 
-  const res = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4.1-mini",
-      input: [{ role: "user", content }]
-    })
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
 
-  const raw = await res.text();
+  try {
+    const res = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        input: [{ role: "user", content }]
+      }),
+      signal: controller.signal
+    });
 
-  if (!res.ok) {
-    console.log("OpenAI error:", raw);
+    const raw = await res.text();
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.log("OpenAI error:", raw);
+      return null;
+    }
+
+    const data = JSON.parse(raw);
+
+    const text =
+      data.output_text ||
+      data.output?.[0]?.content?.[0]?.text ||
+      "";
+
+    return safeJson(text);
+  } catch (err) {
+    clearTimeout(timeout);
+    console.log("OpenAI detect error:", err.message);
+    return null;
+  }
+}
+
+async function getEbayToken() {
+  if (ebayToken && Date.now() < ebayTokenExpires) return ebayToken;
+
+  if (!process.env.EBAY_CLIENT_ID || !process.env.EBAY_CLIENT_SECRET) {
     return null;
   }
 
-  const data = JSON.parse(raw);
-  const text =
-    data.output_text ||
-    data.output?.[0]?.content?.[0]?.text ||
-    "";
+  const auth = Buffer.from(
+    `${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`
+  ).toString("base64");
 
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
+  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
+  });
 
-  if (start === -1 || end === -1) return null;
+  const data = await res.json();
 
-  return JSON.parse(text.slice(start, end + 1));
+  if (!data.access_token) {
+    console.log("eBay token failed:", data);
+    return null;
+  }
+
+  ebayToken = data.access_token;
+  ebayTokenExpires = Date.now() + (data.expires_in - 60) * 1000;
+
+  return ebayToken;
+}
+
+function buildSearchQuery(card) {
+  return [
+    card.year,
+    card.brand,
+    card.name,
+    card.set,
+    card.cardNumber,
+    card.variant
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/unknown/gi, "")
+    .trim();
+}
+
+async function getEbayAverage(query) {
+  try {
+    const token = await getEbayToken();
+    if (!token || !query) return null;
+
+    const url =
+      "https://api.ebay.com/buy/browse/v1/item_summary/search?q=" +
+      encodeURIComponent(query) +
+      "&limit=20";
+
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
+      }
+    });
+
+    const data = await res.json();
+    const items = data.itemSummaries || [];
+
+    const prices = items
+      .map(i => Number(i.price?.value))
+      .filter(n => Number.isFinite(n) && n > 0 && n < 10000);
+
+    if (!prices.length) return null;
+
+    const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+
+    return {
+      averagePrice: avg.toFixed(2),
+      listingsFound: prices.length,
+      ebayUrl:
+        "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(query)
+    };
+  } catch (err) {
+    console.log("eBay error:", err.message);
+    return null;
+  }
+}
+
+function fallbackName(front) {
+  const f = (front?.originalname || "").toLowerCase();
+
+  if (f.includes("charizard")) return "Charizard Pokémon Card";
+  if (f.includes("pikachu")) return "Pikachu Pokémon Card";
+  if (f.includes("ohtani")) return "Shohei Ohtani Rookie Card";
+  if (f.includes("wembanyama") || f.includes("wemby")) return "Victor Wembanyama Rookie Card";
+  if (f.includes("mahomes")) return "Patrick Mahomes Rookie Card";
+
+  return "Unknown Trading Card";
+}
+
+function marketScore(card) {
+  const text = JSON.stringify(card).toLowerCase();
+
+  let score = 70;
+
+  if (text.includes("rookie")) score += 8;
+  if (text.includes("psa")) score += 5;
+  if (text.includes("holo")) score += 7;
+  if (text.includes("refractor")) score += 7;
+  if (text.includes("charizard")) score += 18;
+  if (text.includes("pikachu")) score += 10;
+  if (text.includes("ohtani")) score += 15;
+  if (text.includes("wembanyama")) score += 15;
+  if (text.includes("mahomes")) score += 12;
+
+  return Math.min(score, 96);
+}
+
+function signal(score) {
+  if (score >= 90) return "🔥 HOT";
+  if (score >= 80) return "📈 RISING";
+  if (score >= 70) return "👀 WATCH";
+  return "⚠️ LOW SIGNAL";
+}
+
+function fallbackValue(score) {
+  if (score >= 90) return "125.00";
+  if (score >= 80) return "48.00";
+  if (score >= 70) return "22.00";
+  return "9.00";
 }
 
 app.post(
@@ -222,45 +283,59 @@ app.post(
         });
       }
 
-      let detected = null;
+      const detected = await detectCard(front, back);
 
-      try {
-        detected = await detectCard(front, back);
-      } catch (err) {
-        console.log("Detect fallback:", err.message);
-      }
+      const card = detected || {
+        name: fallbackName(front),
+        confidence: 55,
+        gradeHint: "Raw / Estimate",
+        reason: "Fallback result based on filename because AI detection did not return structured data."
+      };
 
-      const name = detected?.name || fallbackCard(front);
-      const score = scoreCard(name);
-      const ebay = await getEbayAverage(name);
+      const query = buildSearchQuery(card) || card.name;
+      const ebay = await getEbayAverage(query);
 
-      const value =
-        ebay?.averagePrice ||
-        (score >= 90 ? "125.00" : score >= 80 ? "48.00" : "22.00");
+      const score = marketScore(card);
+      const value = ebay?.averagePrice || fallbackValue(score);
 
       res.json({
         success: true,
-        name,
-        cardName: name,
-        title: name,
-        brand: detected?.brand || "",
-        year: detected?.year || "",
-        set: detected?.set || "",
-        cardNumber: detected?.cardNumber || "",
+
+        name: card.name || fallbackName(front),
+        cardName: card.name || fallbackName(front),
+        title: card.name || fallbackName(front),
+
+        playerOrCharacter: card.playerOrCharacter || "",
+        sportOrCategory: card.sportOrCategory || "",
+        brand: card.brand || "",
+        year: card.year || "",
+        set: card.set || "",
+        cardNumber: card.cardNumber || "",
+        variant: card.variant || "",
+
         value,
         estimatedValue: value,
         averagePrice: value,
-        confidence: detected?.confidence || 78,
+
+        confidence: card.confidence || 70,
         score,
         marketScore: score,
-        gradeHint: detected?.gradeHint || "Raw / Estimate",
+        gradeHint: card.gradeHint || "Raw / Estimate",
+        conditionNotes: card.conditionNotes || "",
         signal: signal(score),
         action: score >= 90 ? "Check comps now" : "Watch market",
+
         reason:
-          detected?.reason ||
-          "Card estimated from image and market signals. Verify with eBay comps before buying or selling.",
+          card.reason ||
+          "AI scan completed. Verify eBay comps before buying or selling.",
+
+        ebaySearchQuery: query,
         ebayListingsFound: ebay?.listingsFound || 0,
-        ebayUrl: ebay?.ebayUrl || ""
+        ebayUrl:
+          ebay?.ebayUrl ||
+          "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(query),
+
+        source: detected ? "OpenAI vision + eBay" : "Fallback + eBay"
       });
     } catch (err) {
       console.error("Scan error:", err);
@@ -275,5 +350,5 @@ app.post(
 );
 
 app.listen(PORT, () => {
-  console.log(`Backend running on port ${PORT}`);
+  console.log(`AI Card Scanner backend running on port ${PORT}`);
 });
