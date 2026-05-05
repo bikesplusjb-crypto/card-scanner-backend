@@ -1,496 +1,254 @@
-process.on("uncaughtException", (err) => {
-  console.error("UNCAUGHT ERROR:", err);
-});
-
-process.on("unhandledRejection", (err) => {
-  console.error("UNHANDLED PROMISE:", err);
-});
-
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer");
+const fetch = require("node-fetch");
 
 const app = express();
-
-app.use(cors());
-app.use(express.json());
-
 const PORT = process.env.PORT || 3000;
 
-const EBAY_CLIENT_ID = process.env.EBAY_CLIENT_ID;
-const EBAY_CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET;
-const EBAY_CAMPAIGN_ID = process.env.EBAY_CAMPAIGN_ID || "5339149252";
+app.use(cors());
+app.use(express.json({ limit: "25mb" }));
 
-let ebayToken = null;
-let ebayTokenExpires = 0;
-
-const underFiveStocks = [
-  "FUBO", "SOFI", "LCID", "SIRI", "OPEN", "PLUG", "RIVN", "DNA", "BBAI", "SOUN"
-];
-
-const cardIdeas = [
-  "Victor Wembanyama base card",
-  "Shohei Ohtani rookie card",
-  "Patrick Mahomes rookie card",
-  "Charizard Pokemon card",
-  "Pikachu promo card",
-  "LeBron James card",
-  "Aaron Judge rookie card",
-  "CJ Stroud rookie card",
-  "Jackson Holliday rookie card",
-  "Pokemon Charmander card"
-];
-
-const knownPokemon = [
-  "charizard", "pikachu", "charmander", "squirtle", "bulbasaur",
-  "mewtwo", "mew", "eevee", "snorlax", "gengar", "lugia",
-  "rayquaza", "umbreon", "dragonite", "blastoise", "venusaur"
-];
-
-function pickRandom(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function cleanPokemonName(input = "") {
-  const cleaned = input
-    .toLowerCase()
-    .replace(/pokémon/g, "pokemon")
-    .replace(/pokemon/g, "")
-    .replace(/card/g, "")
-    .replace(/psa\s*\d+/g, "")
-    .replace(/graded/g, "")
-    .replace(/rookie/g, "")
-    .replace(/[^a-z0-9\s]/g, "")
-    .trim();
-
-  const found = knownPokemon.find(p => cleaned.includes(p));
-  return found || cleaned.split(" ")[0] || "";
-}
-
-function isPokemonCard(query = "") {
-  const lower = query.toLowerCase();
-  return lower.includes("pokemon") || knownPokemon.some(p => lower.includes(p));
-}
-
-async function getEbayToken() {
-  if (ebayToken && Date.now() < ebayTokenExpires) return ebayToken;
-
-  if (!EBAY_CLIENT_ID || !EBAY_CLIENT_SECRET) {
-    throw new Error("Missing eBay credentials");
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 12 * 1024 * 1024
   }
-
-  const auth = Buffer.from(`${EBAY_CLIENT_ID}:${EBAY_CLIENT_SECRET}`).toString("base64");
-
-  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
-  });
-
-  const data = await res.json();
-
-  if (!data.access_token) {
-    console.log("eBay token error:", data);
-    throw new Error("Could not get eBay token");
-  }
-
-  ebayToken = data.access_token;
-  ebayTokenExpires = Date.now() + (data.expires_in - 120) * 1000;
-
-  return ebayToken;
-}
-
-async function getStockData(symbol) {
-  const cleanSymbol = String(symbol || "SOFI").toUpperCase().trim();
-
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(cleanSymbol)}?range=5d&interval=1d`;
-
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0"
-    }
-  });
-
-  const data = await res.json();
-  const result = data?.chart?.result?.[0];
-
-  if (!result) throw new Error(`No stock data for ${cleanSymbol}`);
-
-  const meta = result.meta;
-  const price = meta.regularMarketPrice || meta.previousClose || 0;
-  const previousClose = meta.previousClose || price;
-
-  const change = price - previousClose;
-  const changePercent = previousClose ? (change / previousClose) * 100 : 0;
-
-  return {
-    symbol: cleanSymbol,
-    price: Number(price.toFixed(2)),
-    change: Number(change.toFixed(2)),
-    changePercent: Number(changePercent.toFixed(2)),
-    stockUrl: `https://finance.yahoo.com/quote/${cleanSymbol}`
-  };
-}
-
-async function getPokemonData(cardQuery) {
-  const name = cleanPokemonName(cardQuery);
-
-  if (!name) {
-    return {
-      isPokemon: false,
-      pokemonName: null,
-      pokemonImage: null,
-      pokemonTypes: [],
-      pokemonError: "No Pokémon detected"
-    };
-  }
-
-  try {
-    const res = await fetch(`https://pokeapi.co/api/v2/pokemon/${encodeURIComponent(name)}`);
-
-    if (!res.ok) throw new Error("Pokémon not found");
-
-    const data = await res.json();
-
-    return {
-      isPokemon: true,
-      pokemonName: data.name,
-      pokemonImage:
-        data?.sprites?.other?.["official-artwork"]?.front_default ||
-        data?.sprites?.front_default ||
-        null,
-      pokemonTypes: data.types?.map(t => t.type.name) || [],
-      pokemonError: null
-    };
-  } catch (err) {
-    return {
-      isPokemon: isPokemonCard(cardQuery),
-      pokemonName: name,
-      pokemonImage: null,
-      pokemonTypes: [],
-      pokemonError: err.message
-    };
-  }
-}
-
-async function getCardData(query) {
-  const token = await getEbayToken();
-
-  const searchUrl =
-    "https://api.ebay.com/buy/browse/v1/item_summary/search?" +
-    new URLSearchParams({
-      q: query,
-      limit: "10",
-      filter: "buyingOptions:{FIXED_PRICE}"
-    });
-
-  const res = await fetch(searchUrl, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
-    }
-  });
-
-  const data = await res.json();
-  const items = data.itemSummaries || [];
-
-  const prices = items
-    .map(item => Number(item?.price?.value))
-    .filter(price => !isNaN(price) && price > 0);
-
-  const avgPrice =
-    prices.length > 0
-      ? prices.reduce((a, b) => a + b, 0) / prices.length
-      : 0;
-
-  const bestItem = items[0];
-  const pokemon = await getPokemonData(query);
-
-  return {
-    query,
-    averagePrice: Number(avgPrice.toFixed(2)),
-    listingsFound: items.length,
-    ebayUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(query)}&campid=${EBAY_CAMPAIGN_ID}`,
-    image: bestItem?.image?.imageUrl || pokemon.pokemonImage || null,
-    title: bestItem?.title || query,
-    pokemon
-  };
-}
-
-function getPsaTrend(card) {
-  let trend = "Flat";
-  let note = "Not enough PSA-specific data yet.";
-
-  const q = String(card.query || "").toLowerCase();
-
-  if (q.includes("charizard") || q.includes("pikachu") || q.includes("wembanyama")) {
-    trend = "Strong";
-    note = "High collector demand keyword detected.";
-  } else if (card.listingsFound >= 8) {
-    trend = "Active";
-    note = "High number of active eBay listings detected.";
-  }
-
-  return { trend, note };
-}
-
-function scoreMatchup(stock, card) {
-  let stockScore = 50;
-  let cardScore = 50;
-
-  if (stock.changePercent > 5) stockScore += 25;
-  else if (stock.changePercent > 2) stockScore += 15;
-  else if (stock.changePercent > 0) stockScore += 8;
-  else if (stock.changePercent < -5) stockScore -= 20;
-  else if (stock.changePercent < 0) stockScore -= 8;
-
-  if (stock.price < 5) stockScore += 8;
-
-  if (card.listingsFound >= 8) cardScore += 18;
-  else if (card.listingsFound >= 4) cardScore += 10;
-
-  if (card.averagePrice > 0 && card.averagePrice <= 10) cardScore += 10;
-  if (card.averagePrice > 50) cardScore -= 6;
-
-  if (card.pokemon?.isPokemon) cardScore += 5;
-
-  const winner = stockScore >= cardScore ? stock.symbol : card.query;
-
-  let decision = "WAIT";
-  const confidence = Math.min(95, Math.abs(stockScore - cardScore) + 60);
-
-  if (stockScore - cardScore >= 15) decision = `BUY ${stock.symbol}`;
-  else if (cardScore - stockScore >= 15) decision = "BUY CARD";
-  else if (stock.changePercent < -7) decision = `AVOID ${stock.symbol}`;
-
-  const reason =
-    stockScore > cardScore
-      ? `${stock.symbol} has stronger short-term momentum and higher liquidity.`
-      : `${card.query} has stronger collectible demand based on current eBay listing signals.`;
-
-  return {
-    stockScore,
-    cardScore,
-    winner,
-    decision,
-    confidence,
-    reason
-  };
-}
-
-function buildTikTokScript(matchup) {
-  return {
-    hook: `Would you rather buy ${matchup.stock.symbol} stock or ${matchup.card.query}?`,
-    script:
-`Today's AI Market Matchup:
-
-${matchup.stock.symbol} is trading around $${matchup.stock.price}, moving ${matchup.stock.changePercent}% today.
-
-The card side is ${matchup.card.query}, with an eBay average listing around $${matchup.card.averagePrice}.
-
-AI Pick: ${matchup.analysis.decision}
-Confidence: ${matchup.analysis.confidence}%
-
-Reason: ${matchup.analysis.reason}
-
-Would you take the stock or the card?`,
-    caption: `${matchup.stock.symbol} vs ${matchup.card.query} 👀 AI Pick: ${matchup.analysis.decision}`,
-    hashtags: [
-      "#sportscards",
-      "#pokemoncards",
-      "#pennystocks",
-      "#stocks",
-      "#collectibles",
-      "#investing",
-      "#cardcollector",
-      "#aitools"
-    ]
-  };
-}
-
-async function buildMatchup(stockSymbol, cardQuery) {
-  let stock;
-  let card;
-
-  try {
-    stock = await getStockData(stockSymbol);
-  } catch (e) {
-    console.log("Stock fallback:", e.message);
-
-    const cleanSymbol = String(stockSymbol || "SOFI").toUpperCase();
-
-    stock = {
-      symbol: cleanSymbol,
-      price: 0,
-      change: 0,
-      changePercent: 0,
-      stockUrl: `https://finance.yahoo.com/quote/${cleanSymbol}`
-    };
-  }
-
-  try {
-    card = await getCardData(cardQuery);
-  } catch (e) {
-    console.log("Card fallback:", e.message);
-
-    const pokemon = await getPokemonData(cardQuery);
-
-    card = {
-      query: cardQuery,
-      averagePrice: 0,
-      listingsFound: 0,
-      ebayUrl: `https://www.ebay.com/sch/i.html?_nkw=${encodeURIComponent(cardQuery)}&campid=${EBAY_CAMPAIGN_ID}`,
-      image: pokemon.pokemonImage,
-      title: cardQuery,
-      pokemon
-    };
-  }
-
-  const psaTrend = getPsaTrend(card);
-  const analysis = scoreMatchup(stock, card);
-
-  const matchup = {
-    title: `${stock.symbol} vs ${card.query}`,
-    stock,
-    card,
-    psaTrend,
-    analysis,
-    updatedAt: new Date().toISOString()
-  };
-
-  matchup.tiktok = buildTikTokScript(matchup);
-
-  return matchup;
-}
+});
 
 app.get("/", (req, res) => {
   res.json({
-    status: "AI Market Matchup Backend Running",
-    endpoints: [
-      "/api/health",
-      "/api/auto-matchups",
-      "/api/under-five",
-      "/api/matchup?stock=SOFI&card=Charizard%20Pokemon%20card",
-      "/api/pokemon?card=Charizard%20Pokemon%20card",
-      "/api/tiktok-idea"
-    ]
+    status: "AI Card Scanner Backend Running",
+    endpoints: ["/api/health", "/api/scan-card"]
   });
 });
 
 app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
-    message: "Backend connected",
-    updatedAt: new Date().toISOString()
+    status: "Backend connected",
+    time: new Date().toISOString()
   });
 });
 
-app.get("/api/pokemon", async (req, res) => {
-  try {
-    const card = req.query.card || req.query.name || "Charizard Pokemon card";
-    const pokemon = await getPokemonData(card);
+function cleanCardName(text = "") {
+  return text
+    .replace(/pokemon/gi, "Pokémon")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-    res.json({
-      input: card,
-      cleanedName: cleanPokemonName(card),
-      pokemon
-    });
-  } catch (err) {
-    res.status(500).json({
-      error: "Pokemon failed",
-      details: err.message
-    });
+function guessCardFromFilename(file) {
+  const name = file?.originalname || "";
+
+  const lower = name.toLowerCase();
+
+  if (lower.includes("charizard")) return "Charizard Pokémon Card";
+  if (lower.includes("pikachu")) return "Pikachu Pokémon Card";
+  if (lower.includes("ohtani")) return "Shohei Ohtani Rookie Card";
+  if (lower.includes("wembanyama") || lower.includes("wemby")) return "Victor Wembanyama Rookie Card";
+  if (lower.includes("mahomes")) return "Patrick Mahomes Rookie Card";
+
+  return "Unknown Sports / Pokémon Card";
+}
+
+function marketScore(cardName) {
+  const n = cardName.toLowerCase();
+
+  if (
+    n.includes("charizard") ||
+    n.includes("pikachu") ||
+    n.includes("ohtani") ||
+    n.includes("wembanyama") ||
+    n.includes("mahomes")
+  ) {
+    return 91;
   }
-});
 
-app.get("/api/matchup", async (req, res) => {
-  try {
-    const stock = req.query.stock || "SOFI";
-    const card = req.query.card || "Charizard Pokemon card";
-
-    const matchup = await buildMatchup(stock, card);
-    res.json(matchup);
-  } catch (err) {
-    res.status(500).json({
-      error: "Could not build matchup",
-      details: err.message
-    });
+  if (
+    n.includes("rookie") ||
+    n.includes("psa") ||
+    n.includes("pokemon") ||
+    n.includes("pokémon")
+  ) {
+    return 84;
   }
-});
 
-app.get("/api/auto-matchups", async (req, res) => {
-  try {
-    const count = Math.min(Number(req.query.count || 6), 10);
-    const matchups = [];
+  return 76;
+}
 
-    for (let i = 0; i < count; i++) {
-      const stock = pickRandom(underFiveStocks);
-      const card = pickRandom(cardIdeas);
-      const matchup = await buildMatchup(stock, card);
-      matchups.push(matchup);
+function marketSignal(score) {
+  if (score >= 90) return "🔥 HOT";
+  if (score >= 80) return "📈 RISING";
+  if (score >= 70) return "👀 WATCH";
+  return "⚠️ LOW SIGNAL";
+}
+
+function estimateValue(cardName, score) {
+  const n = cardName.toLowerCase();
+
+  if (n.includes("charizard")) return "125.00";
+  if (n.includes("pikachu")) return "55.00";
+  if (n.includes("wembanyama")) return "85.00";
+  if (n.includes("ohtani")) return "95.00";
+  if (n.includes("mahomes")) return "110.00";
+
+  if (score >= 90) return "75.00";
+  if (score >= 80) return "38.00";
+  return "18.00";
+}
+
+async function askOpenAIForCard(frontFile, backFile) {
+  if (!process.env.OPENAI_API_KEY) {
+    return null;
+  }
+
+  const frontBase64 = frontFile.buffer.toString("base64");
+
+  const images = [
+    {
+      type: "input_image",
+      image_url: `data:${frontFile.mimetype};base64,${frontBase64}`
     }
+  ];
 
-    res.json({
-      updatedAt: new Date().toISOString(),
-      count: matchups.length,
-      matchups
-    });
-  } catch (err) {
-    res.status(500).json({
-      error: "Could not generate auto matchups",
-      details: err.message
+  if (backFile) {
+    const backBase64 = backFile.buffer.toString("base64");
+    images.push({
+      type: "input_image",
+      image_url: `data:${backFile.mimetype};base64,${backBase64}`
     });
   }
-});
 
-app.get("/api/under-five", async (req, res) => {
-  try {
-    const matchups = [];
+  const prompt = `
+Identify this trading card as accurately as possible.
 
-    for (let i = 0; i < 5; i++) {
-      const stock = pickRandom(underFiveStocks);
-      const card = pickRandom(cardIdeas);
-      const matchup = await buildMatchup(stock, card);
+Return ONLY valid JSON:
+{
+  "name": "card/player/pokemon name",
+  "brand": "brand if visible",
+  "year": "year if visible",
+  "set": "set if visible",
+  "cardNumber": "card number if visible",
+  "confidence": 0-100,
+  "gradeHint": "Raw / PSA candidate / unclear",
+  "reason": "short reason"
+}
+`;
 
-      if (matchup.stock.price <= 5 || matchup.card.averagePrice <= 10) {
-        matchups.push(matchup);
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4.1-mini",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: prompt },
+            ...images
+          ]
+        }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error("OpenAI scan failed: " + errText);
+  }
+
+  const data = await response.json();
+  const text =
+    data.output_text ||
+    data.output?.[0]?.content?.[0]?.text ||
+    "";
+
+  const jsonStart = text.indexOf("{");
+  const jsonEnd = text.lastIndexOf("}");
+
+  if (jsonStart === -1 || jsonEnd === -1) {
+    throw new Error("OpenAI did not return JSON");
+  }
+
+  return JSON.parse(text.slice(jsonStart, jsonEnd + 1));
+}
+
+app.post(
+  "/api/scan-card",
+  upload.fields([
+    { name: "front", maxCount: 1 },
+    { name: "back", maxCount: 1 }
+  ]),
+  async (req, res) => {
+    try {
+      const front = req.files?.front?.[0];
+      const back = req.files?.back?.[0];
+
+      if (!front) {
+        return res.status(400).json({
+          error: "Front image is required"
+        });
       }
+
+      let detected = null;
+
+      try {
+        detected = await askOpenAIForCard(front, back);
+      } catch (err) {
+        console.log("AI scan fallback:", err.message);
+      }
+
+      const fallbackName = guessCardFromFilename(front);
+
+      const rawName =
+        detected?.name && detected.name !== "unknown"
+          ? detected.name
+          : fallbackName;
+
+      const name = cleanCardName(rawName);
+
+      const score = marketScore(name);
+      const value = estimateValue(name, score);
+      const signal = marketSignal(score);
+
+      res.json({
+        success: true,
+        name,
+        cardName: name,
+        title: name,
+        brand: detected?.brand || "",
+        year: detected?.year || "",
+        set: detected?.set || "",
+        cardNumber: detected?.cardNumber || "",
+        value,
+        estimatedValue: value,
+        averagePrice: value,
+        confidence: detected?.confidence || 78,
+        score,
+        marketScore: score,
+        gradeHint: detected?.gradeHint || "Raw / Estimate",
+        signal,
+        reason:
+          detected?.reason ||
+          "Card estimated from uploaded image. Use eBay comps before buying or selling.",
+        source: detected ? "AI scan" : "Fallback scan"
+      });
+
+    } catch (err) {
+      console.error("Scan error:", err);
+
+      res.status(500).json({
+        error: "Scan failed",
+        message: err.message
+      });
     }
-
-    res.json({
-      updatedAt: new Date().toISOString(),
-      matchups
-    });
-  } catch (err) {
-    res.status(500).json({
-      error: "Could not generate under-five ideas",
-      details: err.message
-    });
   }
-});
-
-app.get("/api/tiktok-idea", async (req, res) => {
-  try {
-    const stock = req.query.stock || pickRandom(underFiveStocks);
-    const card = req.query.card || pickRandom(cardIdeas);
-
-    const matchup = await buildMatchup(stock, card);
-
-    res.json({
-      title: `Viral TikTok Idea: ${matchup.title}`,
-      matchup,
-      tiktok: matchup.tiktok
-    });
-  } catch (err) {
-    res.status(500).json({
-      error: "Could not generate TikTok idea",
-      details: err.message
-    });
-  }
-});
+);
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`AI Card Scanner backend running on port ${PORT}`);
 });
