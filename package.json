@@ -1,16 +1,15 @@
 {
   "name": "card-stock-market-backend",
   "version": "1.0.0",
-  "description": "AI market matchup backend",
+  "description": "AI card scanner backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": "20.x"
-  },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.18.3"
+    "express": "^4.18.3",
+    "multer": "^1.4.5-lts.1",
+    "node-fetch": "^2.7.0"
   }
 }
