@@ -11,10 +11,11 @@ app.use(express.json({ limit: "25mb" }));
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 12 * 1024 * 1024
-  }
+  limits: { fileSize: 12 * 1024 * 1024 }
 });
+
+let ebayToken = null;
+let ebayTokenExpires = 0;
 
 app.get("/", (req, res) => {
   res.json({
@@ -31,29 +32,91 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-function cleanCardName(text = "") {
-  return text
-    .replace(/pokemon/gi, "Pokémon")
-    .replace(/\s+/g, " ")
-    .trim();
+async function getEbayToken() {
+  if (ebayToken && Date.now() < ebayTokenExpires) return ebayToken;
+
+  const id = process.env.EBAY_CLIENT_ID;
+  const secret = process.env.EBAY_CLIENT_SECRET;
+
+  if (!id || !secret) return null;
+
+  const auth = Buffer.from(`${id}:${secret}`).toString("base64");
+
+  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
+  });
+
+  const data = await res.json();
+
+  if (!data.access_token) {
+    console.log("eBay token error:", data);
+    return null;
+  }
+
+  ebayToken = data.access_token;
+  ebayTokenExpires = Date.now() + (data.expires_in - 60) * 1000;
+  return ebayToken;
 }
 
-function guessCardFromFilename(file) {
-  const name = file?.originalname || "";
+async function getEbayAverage(query) {
+  try {
+    const token = await getEbayToken();
+    if (!token) return null;
 
-  const lower = name.toLowerCase();
+    const url =
+      "https://api.ebay.com/buy/browse/v1/item_summary/search?q=" +
+      encodeURIComponent(query) +
+      "&limit=10";
 
-  if (lower.includes("charizard")) return "Charizard Pokémon Card";
-  if (lower.includes("pikachu")) return "Pikachu Pokémon Card";
-  if (lower.includes("ohtani")) return "Shohei Ohtani Rookie Card";
-  if (lower.includes("wembanyama") || lower.includes("wemby")) return "Victor Wembanyama Rookie Card";
-  if (lower.includes("mahomes")) return "Patrick Mahomes Rookie Card";
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
+      }
+    });
 
-  return "Unknown Sports / Pokémon Card";
+    const data = await res.json();
+    const items = data.itemSummaries || [];
+
+    const prices = items
+      .map(i => Number(i.price?.value))
+      .filter(n => !isNaN(n) && n > 0);
+
+    if (!prices.length) return null;
+
+    const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+
+    return {
+      averagePrice: avg.toFixed(2),
+      listingsFound: prices.length,
+      ebayUrl:
+        "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(query)
+    };
+  } catch (err) {
+    console.log("eBay average error:", err.message);
+    return null;
+  }
 }
 
-function marketScore(cardName) {
-  const n = cardName.toLowerCase();
+function fallbackCard(front) {
+  const file = (front?.originalname || "").toLowerCase();
+
+  if (file.includes("charizard")) return "Charizard Pokémon Card";
+  if (file.includes("pikachu")) return "Pikachu Pokémon Card";
+  if (file.includes("ohtani")) return "Shohei Ohtani Rookie Card";
+  if (file.includes("wembanyama") || file.includes("wemby")) return "Victor Wembanyama Rookie Card";
+  if (file.includes("mahomes")) return "Patrick Mahomes Rookie Card";
+
+  return "Unknown Trading Card";
+}
+
+function scoreCard(name) {
+  const n = name.toLowerCase();
 
   if (
     n.includes("charizard") ||
@@ -61,71 +124,31 @@ function marketScore(cardName) {
     n.includes("ohtani") ||
     n.includes("wembanyama") ||
     n.includes("mahomes")
-  ) {
-    return 91;
-  }
+  ) return 91;
 
-  if (
-    n.includes("rookie") ||
-    n.includes("psa") ||
-    n.includes("pokemon") ||
-    n.includes("pokémon")
-  ) {
-    return 84;
-  }
+  if (n.includes("rookie") || n.includes("pokemon") || n.includes("pokémon") || n.includes("psa")) return 84;
 
   return 76;
 }
 
-function marketSignal(score) {
+function signal(score) {
   if (score >= 90) return "🔥 HOT";
   if (score >= 80) return "📈 RISING";
   if (score >= 70) return "👀 WATCH";
   return "⚠️ LOW SIGNAL";
 }
 
-function estimateValue(cardName, score) {
-  const n = cardName.toLowerCase();
+async function detectCard(front, back) {
+  if (!process.env.OPENAI_API_KEY) return null;
 
-  if (n.includes("charizard")) return "125.00";
-  if (n.includes("pikachu")) return "55.00";
-  if (n.includes("wembanyama")) return "85.00";
-  if (n.includes("ohtani")) return "95.00";
-  if (n.includes("mahomes")) return "110.00";
-
-  if (score >= 90) return "75.00";
-  if (score >= 80) return "38.00";
-  return "18.00";
-}
-
-async function askOpenAIForCard(frontFile, backFile) {
-  if (!process.env.OPENAI_API_KEY) {
-    return null;
-  }
-
-  const frontBase64 = frontFile.buffer.toString("base64");
-
-  const images = [
+  const content = [
     {
-      type: "input_image",
-      image_url: `data:${frontFile.mimetype};base64,${frontBase64}`
-    }
-  ];
-
-  if (backFile) {
-    const backBase64 = backFile.buffer.toString("base64");
-    images.push({
-      type: "input_image",
-      image_url: `data:${backFile.mimetype};base64,${backBase64}`
-    });
-  }
-
-  const prompt = `
-Identify this trading card as accurately as possible.
+      type: "input_text",
+      text: `Identify this trading card from the images.
 
 Return ONLY valid JSON:
 {
-  "name": "card/player/pokemon name",
+  "name": "full card name",
   "brand": "brand if visible",
   "year": "year if visible",
   "set": "set if visible",
@@ -133,10 +156,22 @@ Return ONLY valid JSON:
   "confidence": 0-100,
   "gradeHint": "Raw / PSA candidate / unclear",
   "reason": "short reason"
-}
-`;
+}`
+    },
+    {
+      type: "input_image",
+      image_url: `data:${front.mimetype};base64,${front.buffer.toString("base64")}`
+    }
+  ];
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  if (back) {
+    content.push({
+      type: "input_image",
+      image_url: `data:${back.mimetype};base64,${back.buffer.toString("base64")}`
+    });
+  }
+
+  const res = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -144,37 +179,29 @@ Return ONLY valid JSON:
     },
     body: JSON.stringify({
       model: "gpt-4.1-mini",
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: prompt },
-            ...images
-          ]
-        }
-      ]
+      input: [{ role: "user", content }]
     })
   });
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error("OpenAI scan failed: " + errText);
+  const raw = await res.text();
+
+  if (!res.ok) {
+    console.log("OpenAI error:", raw);
+    return null;
   }
 
-  const data = await response.json();
+  const data = JSON.parse(raw);
   const text =
     data.output_text ||
     data.output?.[0]?.content?.[0]?.text ||
     "";
 
-  const jsonStart = text.indexOf("{");
-  const jsonEnd = text.lastIndexOf("}");
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
 
-  if (jsonStart === -1 || jsonEnd === -1) {
-    throw new Error("OpenAI did not return JSON");
-  }
+  if (start === -1 || end === -1) return null;
 
-  return JSON.parse(text.slice(jsonStart, jsonEnd + 1));
+  return JSON.parse(text.slice(start, end + 1));
 }
 
 app.post(
@@ -190,30 +217,26 @@ app.post(
 
       if (!front) {
         return res.status(400).json({
-          error: "Front image is required"
+          success: false,
+          error: "Front image required"
         });
       }
 
       let detected = null;
 
       try {
-        detected = await askOpenAIForCard(front, back);
+        detected = await detectCard(front, back);
       } catch (err) {
-        console.log("AI scan fallback:", err.message);
+        console.log("Detect fallback:", err.message);
       }
 
-      const fallbackName = guessCardFromFilename(front);
+      const name = detected?.name || fallbackCard(front);
+      const score = scoreCard(name);
+      const ebay = await getEbayAverage(name);
 
-      const rawName =
-        detected?.name && detected.name !== "unknown"
-          ? detected.name
-          : fallbackName;
-
-      const name = cleanCardName(rawName);
-
-      const score = marketScore(name);
-      const value = estimateValue(name, score);
-      const signal = marketSignal(score);
+      const value =
+        ebay?.averagePrice ||
+        (score >= 90 ? "125.00" : score >= 80 ? "48.00" : "22.00");
 
       res.json({
         success: true,
@@ -231,17 +254,19 @@ app.post(
         score,
         marketScore: score,
         gradeHint: detected?.gradeHint || "Raw / Estimate",
-        signal,
+        signal: signal(score),
+        action: score >= 90 ? "Check comps now" : "Watch market",
         reason:
           detected?.reason ||
-          "Card estimated from uploaded image. Use eBay comps before buying or selling.",
-        source: detected ? "AI scan" : "Fallback scan"
+          "Card estimated from image and market signals. Verify with eBay comps before buying or selling.",
+        ebayListingsFound: ebay?.listingsFound || 0,
+        ebayUrl: ebay?.ebayUrl || ""
       });
-
     } catch (err) {
       console.error("Scan error:", err);
 
       res.status(500).json({
+        success: false,
         error: "Scan failed",
         message: err.message
       });
@@ -250,5 +275,5 @@ app.post(
 );
 
 app.listen(PORT, () => {
-  console.log(`AI Card Scanner backend running on port ${PORT}`);
+  console.log(`Backend running on port ${PORT}`);
 });
