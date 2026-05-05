@@ -1,7 +1,6 @@
 {
-  "name": "card-stock-market-backend",
+  "name": "card-scanner-backend",
   "version": "1.0.0",
-  "description": "AI card scanner backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
