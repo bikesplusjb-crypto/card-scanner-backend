@@ -4,147 +4,38 @@ const multer = require("multer");
 const fetch = require("node-fetch");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(cors());
 app.use(express.json({ limit: "25mb" }));
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 12 * 1024 * 1024 }
-});
+const PORT = process.env.PORT || 3000;
+
+const EBAY_CLIENT_ID = process.env.EBAY_CLIENT_ID;
+const EBAY_CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 let ebayToken = null;
 let ebayTokenExpires = 0;
 
 app.get("/", (req, res) => {
-  res.json({
-    status: "AI Card Scanner Backend Running",
-    endpoints: ["/api/health", "/api/scan-card"]
-  });
+  res.json({ status: "ok", message: "Card scanner backend running" });
 });
 
 app.get("/api/health", (req, res) => {
-  res.json({
-    ok: true,
-    status: "Backend connected",
-    time: new Date().toISOString()
-  });
+  res.json({ status: "ok", service: "card-scanner-backend" });
 });
-
-function safeJson(text) {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end === -1) return null;
-
-  try {
-    return JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return null;
-  }
-}
-
-async function detectCard(front, back) {
-  if (!process.env.OPENAI_API_KEY) return null;
-
-  const content = [
-    {
-      type: "input_text",
-      text: `
-You are an expert sports card, Pokémon card, and trading card identifier.
-
-Analyze the uploaded card image(s).
-
-Return ONLY valid JSON. No markdown. No explanation.
-
-Use this exact structure:
-{
-  "name": "full card name",
-  "playerOrCharacter": "player or Pokemon name",
-  "sportOrCategory": "baseball / basketball / football / pokemon / other",
-  "year": "year if visible or likely",
-  "brand": "Topps / Panini / Bowman / Pokemon / etc",
-  "set": "set name if visible",
-  "cardNumber": "card number if visible",
-  "variant": "rookie / refractor / holo / reverse holo / base / unknown",
-  "gradeHint": "Raw / PSA candidate / unclear",
-  "confidence": 0,
-  "conditionNotes": "short condition note",
-  "reason": "short reason for identification"
-}
-
-Rules:
-- If unsure, use best guess but lower confidence.
-- Back image may contain year, set, card number, and brand.
-- Do not invent exact card number unless visible.
-- For Pokémon, identify character and likely card type.
-      `
-    },
-    {
-      type: "input_image",
-      image_url: `data:${front.mimetype};base64,${front.buffer.toString("base64")}`
-    }
-  ];
-
-  if (back) {
-    content.push({
-      type: "input_image",
-      image_url: `data:${back.mimetype};base64,${back.buffer.toString("base64")}`
-    });
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
-
-  try {
-    const res = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        input: [{ role: "user", content }]
-      }),
-      signal: controller.signal
-    });
-
-    const raw = await res.text();
-    clearTimeout(timeout);
-
-    if (!res.ok) {
-      console.log("OpenAI error:", raw);
-      return null;
-    }
-
-    const data = JSON.parse(raw);
-
-    const text =
-      data.output_text ||
-      data.output?.[0]?.content?.[0]?.text ||
-      "";
-
-    return safeJson(text);
-  } catch (err) {
-    clearTimeout(timeout);
-    console.log("OpenAI detect error:", err.message);
-    return null;
-  }
-}
 
 async function getEbayToken() {
   if (ebayToken && Date.now() < ebayTokenExpires) return ebayToken;
 
-  if (!process.env.EBAY_CLIENT_ID || !process.env.EBAY_CLIENT_SECRET) {
-    return null;
+  if (!EBAY_CLIENT_ID || !EBAY_CLIENT_SECRET) {
+    throw new Error("Missing EBAY_CLIENT_ID or EBAY_CLIENT_SECRET");
   }
 
-  const auth = Buffer.from(
-    `${process.env.EBAY_CLIENT_ID}:${process.env.EBAY_CLIENT_SECRET}`
-  ).toString("base64");
+  const auth = Buffer.from(`${EBAY_CLIENT_ID}:${EBAY_CLIENT_SECRET}`).toString("base64");
 
-  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+  const response = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
     method: "POST",
     headers: {
       Authorization: `Basic ${auth}`,
@@ -153,11 +44,10 @@ async function getEbayToken() {
     body: "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
   });
 
-  const data = await res.json();
+  const data = await response.json();
 
   if (!data.access_token) {
-    console.log("eBay token failed:", data);
-    return null;
+    throw new Error("Could not get eBay token: " + JSON.stringify(data));
   }
 
   ebayToken = data.access_token;
@@ -166,189 +56,249 @@ async function getEbayToken() {
   return ebayToken;
 }
 
-function buildSearchQuery(card) {
-  return [
-    card.year,
-    card.brand,
-    card.name,
-    card.set,
-    card.cardNumber,
-    card.variant
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .replace(/unknown/gi, "")
-    .trim();
+async function imageToBase64(file) {
+  return file.buffer.toString("base64");
 }
 
-async function getEbayAverage(query) {
-  try {
-    const token = await getEbayToken();
-    if (!token || !query) return null;
+async function identifyCard(frontFile, backFile, manualName) {
+  if (manualName && manualName.trim()) {
+    return {
+      name: manualName.trim(),
+      year: "",
+      brand: "",
+      set: "",
+      cardNumber: "",
+      grade: "Raw / Unknown",
+      confidence: 85
+    };
+  }
 
-    const url =
-      "https://api.ebay.com/buy/browse/v1/item_summary/search?q=" +
-      encodeURIComponent(query) +
-      "&limit=20";
+  if (!OPENAI_API_KEY) {
+    return {
+      name: "Unknown Sports Card",
+      year: "",
+      brand: "",
+      set: "",
+      cardNumber: "",
+      grade: "Raw / Unknown",
+      confidence: 50
+    };
+  }
 
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
+  const frontBase64 = await imageToBase64(frontFile);
+  const content = [
+    {
+      type: "text",
+      text:
+        "Identify this trading card. Return ONLY valid JSON with these fields: name, player, year, brand, set, cardNumber, sport, grade, confidence. If unsure, make the best estimate."
+    },
+    {
+      type: "image_url",
+      image_url: {
+        url: `data:${frontFile.mimetype};base64,${frontBase64}`
+      }
+    }
+  ];
+
+  if (backFile) {
+    const backBase64 = await imageToBase64(backFile);
+    content.push({
+      type: "image_url",
+      image_url: {
+        url: `data:${backFile.mimetype};base64,${backBase64}`
       }
     });
+  }
 
-    const data = await res.json();
-    const items = data.itemSummaries || [];
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "user",
+          content
+        }
+      ],
+      max_tokens: 500
+    })
+  });
 
-    const prices = items
-      .map(i => Number(i.price?.value))
-      .filter(n => Number.isFinite(n) && n > 0 && n < 10000);
+  const data = await response.json();
+  const raw = data?.choices?.[0]?.message?.content || "{}";
 
-    if (!prices.length) return null;
-
-    const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
-
+  try {
+    const cleaned = raw.replace(/```json|```/g, "").trim();
+    return JSON.parse(cleaned);
+  } catch {
     return {
-      averagePrice: avg.toFixed(2),
-      listingsFound: prices.length,
-      ebayUrl:
-        "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(query)
+      name: raw.slice(0, 120) || "Unknown Sports Card",
+      year: "",
+      brand: "",
+      set: "",
+      cardNumber: "",
+      grade: "Raw / Unknown",
+      confidence: 60
     };
-  } catch (err) {
-    console.log("eBay error:", err.message);
-    return null;
   }
 }
 
-function fallbackName(front) {
-  const f = (front?.originalname || "").toLowerCase();
+function buildSearchQuery(card) {
+  const parts = [
+    card.year,
+    card.brand,
+    card.player || card.name,
+    card.set,
+    card.cardNumber
+  ].filter(Boolean);
 
-  if (f.includes("charizard")) return "Charizard Pokémon Card";
-  if (f.includes("pikachu")) return "Pikachu Pokémon Card";
-  if (f.includes("ohtani")) return "Shohei Ohtani Rookie Card";
-  if (f.includes("wembanyama") || f.includes("wemby")) return "Victor Wembanyama Rookie Card";
-  if (f.includes("mahomes")) return "Patrick Mahomes Rookie Card";
-
-  return "Unknown Trading Card";
+  return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
-function marketScore(card) {
-  const text = JSON.stringify(card).toLowerCase();
+async function getEbaySoldComps(query) {
+  const token = await getEbayToken();
 
-  let score = 70;
+  const url =
+    "https://api.ebay.com/buy/browse/v1/item_summary/search?" +
+    new URLSearchParams({
+      q: query,
+      limit: "20",
+      filter: "buyingOptions:{FIXED_PRICE}"
+    }).toString();
 
-  if (text.includes("rookie")) score += 8;
-  if (text.includes("psa")) score += 5;
-  if (text.includes("holo")) score += 7;
-  if (text.includes("refractor")) score += 7;
-  if (text.includes("charizard")) score += 18;
-  if (text.includes("pikachu")) score += 10;
-  if (text.includes("ohtani")) score += 15;
-  if (text.includes("wembanyama")) score += 15;
-  if (text.includes("mahomes")) score += 12;
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "X-EBAY-C-MARKETPLACE-ID": "EBAY_US"
+    }
+  });
 
-  return Math.min(score, 96);
+  const data = await response.json();
+  const items = data.itemSummaries || [];
+
+  const prices = items
+    .map(item => Number(item.price?.value))
+    .filter(price => price && price > 1 && price < 100000);
+
+  if (!prices.length) {
+    return {
+      avgSoldPrice: null,
+      lowPrice: null,
+      highPrice: null,
+      salesCount: 0,
+      comps: []
+    };
+  }
+
+  prices.sort((a, b) => a - b);
+
+  const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+
+  return {
+    avgSoldPrice: Number(avg.toFixed(2)),
+    lowPrice: Number(prices[0].toFixed(2)),
+    highPrice: Number(prices[prices.length - 1].toFixed(2)),
+    salesCount: prices.length,
+    comps: items.slice(0, 6).map(item => ({
+      title: item.title,
+      price: item.price?.value,
+      url: item.itemWebUrl
+    }))
+  };
 }
 
-function signal(score) {
+function marketScore(avgSoldPrice, salesCount, confidence) {
+  let score = 60;
+
+  if (avgSoldPrice >= 25) score += 8;
+  if (avgSoldPrice >= 75) score += 8;
+  if (avgSoldPrice >= 150) score += 8;
+  if (salesCount >= 5) score += 8;
+  if (salesCount >= 10) score += 6;
+  if (confidence >= 85) score += 5;
+
+  return Math.min(score, 98);
+}
+
+function signalFromScore(score) {
   if (score >= 90) return "🔥 HOT";
-  if (score >= 80) return "📈 RISING";
+  if (score >= 82) return "📈 RISING";
   if (score >= 70) return "👀 WATCH";
   return "⚠️ LOW SIGNAL";
 }
 
-function fallbackValue(score) {
-  if (score >= 90) return "125.00";
-  if (score >= 80) return "48.00";
-  if (score >= 70) return "22.00";
-  return "9.00";
-}
+app.post("/api/scan-card", upload.fields([
+  { name: "front", maxCount: 1 },
+  { name: "back", maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const frontFile = req.files?.front?.[0];
+    const backFile = req.files?.back?.[0];
+    const manualName = req.body.manualName || "";
 
-app.post(
-  "/api/scan-card",
-  upload.fields([
-    { name: "front", maxCount: 1 },
-    { name: "back", maxCount: 1 }
-  ]),
-  async (req, res) => {
-    try {
-      const front = req.files?.front?.[0];
-      const back = req.files?.back?.[0];
-
-      if (!front) {
-        return res.status(400).json({
-          success: false,
-          error: "Front image required"
-        });
-      }
-
-      const detected = await detectCard(front, back);
-
-      const card = detected || {
-        name: fallbackName(front),
-        confidence: 55,
-        gradeHint: "Raw / Estimate",
-        reason: "Fallback result based on filename because AI detection did not return structured data."
-      };
-
-      const query = buildSearchQuery(card) || card.name;
-      const ebay = await getEbayAverage(query);
-
-      const score = marketScore(card);
-      const value = ebay?.averagePrice || fallbackValue(score);
-
-      res.json({
-        success: true,
-
-        name: card.name || fallbackName(front),
-        cardName: card.name || fallbackName(front),
-        title: card.name || fallbackName(front),
-
-        playerOrCharacter: card.playerOrCharacter || "",
-        sportOrCategory: card.sportOrCategory || "",
-        brand: card.brand || "",
-        year: card.year || "",
-        set: card.set || "",
-        cardNumber: card.cardNumber || "",
-        variant: card.variant || "",
-
-        value,
-        estimatedValue: value,
-        averagePrice: value,
-
-        confidence: card.confidence || 70,
-        score,
-        marketScore: score,
-        gradeHint: card.gradeHint || "Raw / Estimate",
-        conditionNotes: card.conditionNotes || "",
-        signal: signal(score),
-        action: score >= 90 ? "Check comps now" : "Watch market",
-
-        reason:
-          card.reason ||
-          "AI scan completed. Verify eBay comps before buying or selling.",
-
-        ebaySearchQuery: query,
-        ebayListingsFound: ebay?.listingsFound || 0,
-        ebayUrl:
-          ebay?.ebayUrl ||
-          "https://www.ebay.com/sch/i.html?_nkw=" + encodeURIComponent(query),
-
-        source: detected ? "OpenAI vision + eBay" : "Fallback + eBay"
-      });
-    } catch (err) {
-      console.error("Scan error:", err);
-
-      res.status(500).json({
+    if (!frontFile && !manualName) {
+      return res.status(400).json({
         success: false,
-        error: "Scan failed",
-        message: err.message
+        error: "Upload front image or provide manualName"
       });
     }
+
+    const card = await identifyCard(frontFile, backFile, manualName);
+    const searchQuery = buildSearchQuery(card);
+
+    const pricing = await getEbaySoldComps(searchQuery);
+
+    const score = marketScore(
+      pricing.avgSoldPrice || 0,
+      pricing.salesCount || 0,
+      Number(card.confidence || 75)
+    );
+
+    res.json({
+      success: true,
+      name: searchQuery || card.name || "Unknown Card",
+      cardName: searchQuery || card.name || "Unknown Card",
+      year: card.year || "",
+      brand: card.brand || "",
+      set: card.set || "",
+      cardNumber: card.cardNumber || "",
+      grade: card.grade || "Raw / Unknown",
+      confidence: Number(card.confidence || 75),
+      avgSoldPrice: pricing.avgSoldPrice,
+      averagePrice: pricing.avgSoldPrice,
+      estimatedValue: pricing.avgSoldPrice,
+      value: pricing.avgSoldPrice || "N/A",
+      lowPrice: pricing.lowPrice,
+      highPrice: pricing.highPrice,
+      salesCount: pricing.salesCount,
+      soldCount: pricing.salesCount,
+      comps: pricing.comps,
+      score,
+      marketScore: score,
+      signal: signalFromScore(score),
+      action: score >= 85 ? "Check comps now" : "Research before buying",
+      reason:
+        pricing.avgSoldPrice
+          ? `Based on current eBay market listings found for "${searchQuery}". Always verify recent sold comps, condition, grade, and exact card match before buying.`
+          : `Card identified as "${searchQuery}", but no reliable pricing was returned. Use sold comps links to verify manually.`
+    });
+
+  } catch (error) {
+    console.error("SCAN ERROR:", error);
+
+    res.status(500).json({
+      success: false,
+      error: "Scan failed",
+      message: error.message
+    });
   }
-);
+});
 
 app.listen(PORT, () => {
-  console.log(`AI Card Scanner backend running on port ${PORT}`);
+  console.log(`Card scanner backend running on port ${PORT}`);
 });
