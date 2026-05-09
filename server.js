@@ -1,8 +1,8 @@
-/* =========================================
+/* ===============================
    TRACK THE MARKET
-   PREMIUM SCANNER BACKEND
-   UPDATED server.js
-========================================= */
+   REAL AI CARD SCANNER BACKEND
+   server.js
+================================ */
 
 const express = require("express");
 const cors = require("cors");
@@ -11,393 +11,281 @@ const fetch = require("node-fetch");
 
 const app = express();
 
-/* =========================================
-   BASIC SETUP
-========================================= */
-
 app.use(cors());
-
-app.use(express.json({
-  limit: "10mb"
-}));
-
-app.use(express.urlencoded({
-  extended: true
-}));
-
-/* =========================================
-   FILE UPLOAD
-========================================= */
+app.use(express.json({ limit: "20mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 const upload = multer({
-
   storage: multer.memoryStorage(),
-
   limits: {
-    fileSize: 10 * 1024 * 1024
+    fileSize: 15 * 1024 * 1024
   }
-
 });
 
-/* =========================================
-   ROOT
-========================================= */
+/* ===============================
+   TEST ROUTES
+================================ */
 
 app.get("/", (req, res) => {
-
   res.json({
     success: true,
-    app: "Track The Market Backend",
+    app: "Track The Market Scanner Backend",
     status: "online"
   });
-
 });
 
-/* =========================================
-   HEALTH CHECK
-========================================= */
-
 app.get("/health", (req, res) => {
-
   res.json({
     success: true,
     status: "healthy",
     uptime: process.uptime()
   });
-
 });
 
-/* =========================================
-   EBAY TOKEN
-========================================= */
+/* ===============================
+   HELPERS
+================================ */
 
-let ebayToken = null;
-
-let tokenExpires = 0;
-
-async function getEbayToken() {
-
-  try {
-
-    if (
-      ebayToken &&
-      Date.now() < tokenExpires
-    ) {
-
-      return ebayToken;
-
-    }
-
-    if (
-      !process.env.EBAY_CLIENT_ID ||
-      !process.env.EBAY_CLIENT_SECRET
-    ) {
-
-      console.log(
-        "Missing eBay environment variables"
-      );
-
-      return null;
-    }
-
-    const auth = Buffer.from(
-      process.env.EBAY_CLIENT_ID +
-      ":" +
-      process.env.EBAY_CLIENT_SECRET
-    ).toString("base64");
-
-    const response = await fetch(
-      "https://api.ebay.com/identity/v1/oauth2/token",
-      {
-        method: "POST",
-
-        headers: {
-          Authorization:
-            `Basic ${auth}`,
-
-          "Content-Type":
-            "application/x-www-form-urlencoded"
-        },
-
-        body:
-          "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
-      }
-    );
-
-    const data = await response.json();
-
-    if (!data.access_token) {
-
-      console.log(
-        "eBay token failed"
-      );
-
-      return null;
-    }
-
-    ebayToken =
-      data.access_token;
-
-    tokenExpires =
-      Date.now() +
-      ((data.expires_in || 7200) - 60) * 1000;
-
-    return ebayToken;
-
-  } catch (error) {
-
-    console.log(
-      "eBay token error:",
-      error.message
-    );
-
-    return null;
-  }
-
+function fileToDataUrl(file) {
+  const mime = file.mimetype || "image/jpeg";
+  const base64 = file.buffer.toString("base64");
+  return `data:${mime};base64,${base64}`;
 }
 
-/* =========================================
-   DEMO CARD DATABASE
-========================================= */
+function cleanJsonText(text) {
+  return String(text || "")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+}
 
-const demoCards = [
+function safeNumber(value, fallback = 75) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 
-  {
-    keywords:
-      ["ohtani", "shohei"],
-
-    cardName:
-      "Shohei Ohtani Rookie Card",
-
-    signal:
-      "GRADE",
-
-    avgSoldPrice:
-      180
-  },
-
-  {
-    keywords:
-      ["charizard"],
-
-    cardName:
-      "Charizard Base Set",
-
-    signal:
-      "HOT",
-
-    avgSoldPrice:
-      450
-  },
-
-  {
-    keywords:
-      ["judge", "aaron"],
-
-    cardName:
-      "Aaron Judge Rookie",
-
-    signal:
-      "WATCH",
-
-    avgSoldPrice:
-      120
-  },
-
-  {
-    keywords:
-      ["skenes"],
-
-    cardName:
-      "Paul Skenes Prospect",
-
-    signal:
-      "WATCH",
-
-    avgSoldPrice:
-      95
-  }
-
-];
-
-/* =========================================
-   SIMPLE CARD DETECTION
-========================================= */
-
-function detectDemoCard(filename = "") {
-
-  const lower =
-    filename.toLowerCase();
-
-  for (const card of demoCards) {
-
-    const matched =
-      card.keywords.some(keyword =>
-        lower.includes(keyword)
-      );
-
-    if (matched) {
-
-      return card;
-    }
-
-  }
-
+function buildFallbackResult() {
   return {
-    cardName:
-      "Sports Trading Card",
+    success: true,
+    cardName: "Sports Trading Card",
+    player: "Unknown",
+    year: "Unknown",
+    set: "Unknown",
+    brand: "Unknown",
+    cardNumber: "Unknown",
+    signal: "SCAN READY",
+    confidence: "Low",
+    avgSoldPrice: 75,
+    psa9Value: 100,
+    psa10Value: 170,
+    summary:
+      "Card image uploaded successfully. AI could not fully identify the card. Use manual entry or clearer front/back photos.",
+    source: "fallback"
+  };
+}
 
-    signal:
-      "SCAN READY",
+/* ===============================
+   REAL AI SCANNER
+================================ */
 
-    avgSoldPrice:
-      75
+async function scanWithOpenAI(frontFile, backFile) {
+  if (!process.env.OPENAI_API_KEY) {
+    return buildFallbackResult();
+  }
+
+  const imageInputs = [
+    {
+      type: "image_url",
+      image_url: {
+        url: fileToDataUrl(frontFile)
+      }
+    }
+  ];
+
+  if (backFile) {
+    imageInputs.push({
+      type: "image_url",
+      image_url: {
+        url: fileToDataUrl(backFile)
+      }
+    });
+  }
+
+  const payload = {
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content:
+          "You identify sports cards, Pokemon cards, trading cards, and collectibles from images. Return ONLY valid JSON. Do not include markdown."
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              "Identify this trading card from the image. Return JSON with these exact fields: cardName, player, year, set, brand, cardNumber, sport, signal, confidence, avgSoldPrice, psa9Value, psa10Value, summary. If unsure, make the best estimate and say confidence Low. avgSoldPrice should be a realistic rough estimate in USD, number only. signal must be one of: GRADE, WATCH, SELL RAW, HOT, SCAN READY."
+          },
+          ...imageInputs
+        ]
+      }
+    ],
+    temperature: 0.2,
+    max_tokens: 700
   };
 
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const rawText = await response.text();
+
+  if (!response.ok) {
+    console.error("OPENAI ERROR:", rawText);
+    return buildFallbackResult();
+  }
+
+  let apiData;
+
+  try {
+    apiData = JSON.parse(rawText);
+  } catch (error) {
+    console.error("OPENAI RAW PARSE ERROR:", rawText);
+    return buildFallbackResult();
+  }
+
+  const content =
+    apiData &&
+    apiData.choices &&
+    apiData.choices[0] &&
+    apiData.choices[0].message &&
+    apiData.choices[0].message.content
+      ? apiData.choices[0].message.content
+      : "";
+
+  let parsed;
+
+  try {
+    parsed = JSON.parse(cleanJsonText(content));
+  } catch (error) {
+    console.error("AI JSON PARSE ERROR:", content);
+    return buildFallbackResult();
+  }
+
+  const avgSoldPrice = safeNumber(parsed.avgSoldPrice, 75);
+  const psa9Value = safeNumber(parsed.psa9Value, Math.round(avgSoldPrice * 1.35));
+  const psa10Value = safeNumber(parsed.psa10Value, Math.round(avgSoldPrice * 2.25));
+
+  return {
+    success: true,
+    cardName: parsed.cardName || "Sports Trading Card",
+    player: parsed.player || "Unknown",
+    year: parsed.year || "Unknown",
+    set: parsed.set || "Unknown",
+    brand: parsed.brand || "Unknown",
+    cardNumber: parsed.cardNumber || "Unknown",
+    sport: parsed.sport || "Unknown",
+    signal: parsed.signal || "SCAN READY",
+    confidence: parsed.confidence || "Medium",
+    avgSoldPrice,
+    psa9Value,
+    psa10Value,
+    summary:
+      parsed.summary ||
+      "AI scan completed. Verify details with sold comps before buying, selling, or grading.",
+    source: "openai_vision"
+  };
 }
 
-/* =========================================
-   SCAN API
-========================================= */
+/* ===============================
+   SCAN CARD ENDPOINT
+================================ */
 
 app.post(
   "/api/scan-card",
-
   upload.fields([
-    {
-      name: "front",
-      maxCount: 1
-    },
-
-    {
-      name: "back",
-      maxCount: 1
-    }
+    { name: "front", maxCount: 1 },
+    { name: "back", maxCount: 1 }
   ]),
-
   async (req, res) => {
-
     try {
-
-      const front =
-        req.files?.front?.[0];
-
-      const back =
-        req.files?.back?.[0];
+      const front = req.files && req.files.front ? req.files.front[0] : null;
+      const back = req.files && req.files.back ? req.files.back[0] : null;
 
       if (!front) {
-
         return res.status(400).json({
-
           success: false,
-
-          error:
-            "Front image required"
-
+          error: "Front image required"
         });
-
       }
 
-      console.log(
-        "Front image:",
-        front.originalname
-      );
+      console.log("SCAN STARTED");
+      console.log("Front:", front.originalname, front.mimetype, front.size);
 
       if (back) {
-
-        console.log(
-          "Back image:",
-          back.originalname
-        );
-
+        console.log("Back:", back.originalname, back.mimetype, back.size);
       }
 
-      /* =========================================
-         MOCK DETECTION
-      ========================================= */
-
-      const detected =
-        detectDemoCard(
-          front.originalname
-        );
-
-      /* =========================================
-         OPTIONAL EBAY TOKEN CHECK
-      ========================================= */
-
-      await getEbayToken();
-
-      /* =========================================
-         RESPONSE
-      ========================================= */
+      const result = await scanWithOpenAI(front, back);
 
       return res.json({
-
-        success: true,
-
-        cardName:
-          detected.cardName,
-
-        signal:
-          detected.signal,
-
-        avgSoldPrice:
-          detected.avgSoldPrice,
-
-        timestamp:
-          Date.now()
-
+        ...result,
+        timestamp: Date.now()
       });
-
     } catch (error) {
-
-      console.error(
-        "SCAN ERROR:",
-        error
-      );
+      console.error("SCAN SERVER ERROR:", error);
 
       return res.status(500).json({
-
         success: false,
-
-        error:
-          "Scanner failed"
-
+        error: "Scanner failed on server",
+        details: error.message
       });
-
     }
-
   }
 );
 
-/* =========================================
-   404
-========================================= */
+/* ===============================
+   MANUAL VALUE ENDPOINT
+================================ */
 
-app.use((req, res) => {
+app.post("/api/manual-card", (req, res) => {
+  const name = req.body.cardName || "Manual Trading Card";
+  const rawValue = safeNumber(req.body.rawValue, 75);
 
-  res.status(404).json({
-
-    success: false,
-
-    error:
-      "Endpoint not found"
-
+  res.json({
+    success: true,
+    cardName: name,
+    signal: "MANUAL",
+    avgSoldPrice: rawValue,
+    psa9Value: Math.round(rawValue * 1.35),
+    psa10Value: Math.round(rawValue * 2.25),
+    source: "manual"
   });
-
 });
 
-/* =========================================
-   SERVER START
-========================================= */
+/* ===============================
+   404
+================================ */
 
-const PORT =
-  process.env.PORT || 3000;
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: "Endpoint not found"
+  });
+});
+
+/* ===============================
+   START SERVER
+================================ */
+
+const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-
-  console.log(
-    `Server running on port ${PORT}`
-  );
-
+  console.log(`Track The Market backend running on port ${PORT}`);
 });
