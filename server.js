@@ -1,6 +1,6 @@
 /* ===============================
    TRACK THE MARKET
-   AI SCANNER + EBAY PRICE BACKEND
+   AI SCANNER + EBAY PRICING BACKEND
    server.js
 ================================ */
 
@@ -39,30 +39,30 @@ app.get("/health", (req, res) => {
   });
 });
 
-function fileToDataUrl(file){
+function fileToDataUrl(file) {
   const mime = file.mimetype || "image/jpeg";
   const base64 = file.buffer.toString("base64");
   return `data:${mime};base64,${base64}`;
 }
 
-function cleanJsonText(text){
+function cleanJsonText(text) {
   return String(text || "")
     .replace(/```json/gi, "")
     .replace(/```/g, "")
     .trim();
 }
 
-function safeNumber(value, fallback = 0){
+function safeNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-async function getEbayToken(){
-  if(ebayToken && Date.now() < ebayTokenExpires){
+async function getEbayToken() {
+  if (ebayToken && Date.now() < ebayTokenExpires) {
     return ebayToken;
   }
 
-  if(!process.env.EBAY_CLIENT_ID || !process.env.EBAY_CLIENT_SECRET){
+  if (!process.env.EBAY_CLIENT_ID || !process.env.EBAY_CLIENT_SECRET) {
     console.log("Missing eBay credentials");
     return null;
   }
@@ -79,13 +79,14 @@ async function getEbayToken(){
         Authorization: `Basic ${auth}`,
         "Content-Type": "application/x-www-form-urlencoded"
       },
-      body: "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
+      body:
+        "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
     }
   );
 
   const data = await response.json();
 
-  if(!data.access_token){
+  if (!data.access_token) {
     console.log("eBay token failed:", data);
     return null;
   }
@@ -96,21 +97,22 @@ async function getEbayToken(){
   return ebayToken;
 }
 
-async function getEbayMarketPrice(cardName){
-  try{
+async function getEbayMarketPrice(cardName) {
+  try {
     const token = await getEbayToken();
 
-    if(!token || !cardName){
+    if (!token || !cardName) {
       return {
         avgSoldPrice: 0,
-        priceSource: "No eBay token",
+        priceSource: "No eBay token or card name",
         listings: []
       };
     }
 
-    const query = encodeURIComponent(cardName);
     const url =
-      `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${query}&limit=10&sort=price`;
+      "https://api.ebay.com/buy/browse/v1/item_summary/search?q=" +
+      encodeURIComponent(cardName) +
+      "&limit=10&sort=price";
 
     const response = await fetch(url, {
       headers: {
@@ -127,9 +129,9 @@ async function getEbayMarketPrice(cardName){
     const listings = items
       .map(item => ({
         title: item.title || "",
-        price: safeNumber(item.price?.value, 0),
-        currency: item.price?.currency || "USD",
-        image: item.image?.imageUrl || "",
+        price: safeNumber(item.price && item.price.value, 0),
+        currency: item.price && item.price.currency ? item.price.currency : "USD",
+        image: item.image && item.image.imageUrl ? item.image.imageUrl : "",
         url: item.itemWebUrl || ""
       }))
       .filter(item => item.price > 0);
@@ -138,28 +140,29 @@ async function getEbayMarketPrice(cardName){
 
     const avg =
       prices.length > 0
-        ? Math.round(prices.reduce((a,b) => a + b, 0) / prices.length)
+        ? Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
         : 0;
 
     return {
       avgSoldPrice: avg,
-      priceSource: prices.length ? "eBay active listing average" : "No eBay listings found",
+      priceSource: prices.length
+        ? "eBay active listing average"
+        : "No eBay listings found",
       listings
     };
-
-  }catch(error){
+  } catch (error) {
     console.log("eBay price error:", error.message);
 
     return {
       avgSoldPrice: 0,
-      priceSource: "eBay price lookup failed",
+      priceSource: "eBay lookup failed",
       listings: []
     };
   }
 }
 
-async function scanWithOpenAI(frontFile, backFile){
-  if(!process.env.OPENAI_API_KEY){
+async function scanWithOpenAI(frontFile, backFile) {
+  if (!process.env.OPENAI_API_KEY) {
     return {
       cardName: "Unknown Trading Card",
       player: "Unknown",
@@ -181,7 +184,7 @@ async function scanWithOpenAI(frontFile, backFile){
     }
   ];
 
-  if(backFile){
+  if (backFile) {
     images.push({
       type: "image_url",
       image_url: { url: fileToDataUrl(backFile) }
@@ -223,7 +226,7 @@ async function scanWithOpenAI(frontFile, backFile){
 
   const rawText = await response.text();
 
-  if(!response.ok){
+  if (!response.ok) {
     console.error("OpenAI error:", rawText);
 
     return {
@@ -241,11 +244,18 @@ async function scanWithOpenAI(frontFile, backFile){
   }
 
   const apiData = JSON.parse(rawText);
-  const content = apiData?.choices?.[0]?.message?.content || "";
+  const content =
+    apiData &&
+    apiData.choices &&
+    apiData.choices[0] &&
+    apiData.choices[0].message &&
+    apiData.choices[0].message.content
+      ? apiData.choices[0].message.content
+      : "";
 
-  try{
+  try {
     return JSON.parse(cleanJsonText(content));
-  }catch(error){
+  } catch (error) {
     console.log("AI parse error:", content);
 
     return {
@@ -263,6 +273,38 @@ async function scanWithOpenAI(frontFile, backFile){
   }
 }
 
+app.get("/api/card-price", async (req, res) => {
+  try {
+    const cardName = req.query.cardName;
+
+    if (!cardName) {
+      return res.status(400).json({
+        success: false,
+        error: "Card name required"
+      });
+    }
+
+    const ebay = await getEbayMarketPrice(cardName);
+    const avg = ebay.avgSoldPrice || 0;
+
+    res.json({
+      success: true,
+      cardName,
+      avgSoldPrice: avg,
+      psa9Value: avg > 0 ? Math.round(avg * 1.35) : 0,
+      psa10Value: avg > 0 ? Math.round(avg * 2.25) : 0,
+      priceSource: ebay.priceSource,
+      listings: ebay.listings || []
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: "Price lookup failed",
+      details: error.message
+    });
+  }
+});
+
 app.post(
   "/api/scan-card",
   upload.fields([
@@ -270,11 +312,11 @@ app.post(
     { name: "back", maxCount: 1 }
   ]),
   async (req, res) => {
-    try{
-      const front = req.files?.front?.[0];
-      const back = req.files?.back?.[0];
+    try {
+      const front = req.files && req.files.front ? req.files.front[0] : null;
+      const back = req.files && req.files.back ? req.files.back[0] : null;
 
-      if(!front){
+      if (!front) {
         return res.status(400).json({
           success: false,
           error: "Front image required"
@@ -289,7 +331,6 @@ app.post(
           : [ai.year, ai.brand, ai.player, ai.set].filter(Boolean).join(" ");
 
       const ebay = await getEbayMarketPrice(cleanCardName);
-
       const avgSoldPrice = ebay.avgSoldPrice || 0;
 
       return res.json({
@@ -311,8 +352,7 @@ app.post(
         listings: ebay.listings,
         timestamp: Date.now()
       });
-
-    }catch(error){
+    } catch (error) {
       console.error("Scan server error:", error);
 
       return res.status(500).json({
