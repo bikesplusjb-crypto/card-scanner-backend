@@ -1,177 +1,403 @@
-<script>
+/* =========================================
+   TRACK THE MARKET
+   PREMIUM SCANNER BACKEND
+   UPDATED server.js
+========================================= */
 
-const SCANNER_API =
-  "https://YOUR-RENDER-URL.onrender.com/api/scan-card";
+const express = require("express");
+const cors = require("cors");
+const multer = require("multer");
+const fetch = require("node-fetch");
 
-/*
-  IMPORTANT:
-  Replace ONLY this line above with your real Render backend URL.
+const app = express();
 
-  Example:
-  const SCANNER_API =
-  "https://card-scanner-backend.onrender.com/api/scan-card";
-*/
+/* =========================================
+   BASIC SETUP
+========================================= */
 
-/* SAFE SCANNER */
-async function scanCardReal(){
+app.use(cors());
 
-  const frontInput = document.getElementById("frontInput");
-  const backInput = document.getElementById("backInput");
+app.use(express.json({
+  limit: "10mb"
+}));
 
-  const front = frontInput?.files?.[0];
-  const back = backInput?.files?.[0];
+app.use(express.urlencoded({
+  extended: true
+}));
 
-  if(!front){
+/* =========================================
+   FILE UPLOAD
+========================================= */
 
-    alert("Please upload a front image first.");
+const upload = multer({
 
-    return;
+  storage: multer.memoryStorage(),
+
+  limits: {
+    fileSize: 10 * 1024 * 1024
   }
 
-  /* UI LOADING */
-  document.getElementById("demoCardName").innerText =
-    "Scanning Card...";
+});
 
-  document.getElementById("demoSignal").innerText =
-    "PROCESSING";
+/* =========================================
+   ROOT
+========================================= */
 
-  const formData = new FormData();
+app.get("/", (req, res) => {
 
-  formData.append("front", front);
+  res.json({
+    success: true,
+    app: "Track The Market Backend",
+    status: "online"
+  });
 
-  if(back){
-    formData.append("back", back);
-  }
+});
 
-  try{
+/* =========================================
+   HEALTH CHECK
+========================================= */
+
+app.get("/health", (req, res) => {
+
+  res.json({
+    success: true,
+    status: "healthy",
+    uptime: process.uptime()
+  });
+
+});
+
+/* =========================================
+   EBAY TOKEN
+========================================= */
+
+let ebayToken = null;
+
+let tokenExpires = 0;
+
+async function getEbayToken() {
+
+  try {
+
+    if (
+      ebayToken &&
+      Date.now() < tokenExpires
+    ) {
+
+      return ebayToken;
+
+    }
+
+    if (
+      !process.env.EBAY_CLIENT_ID ||
+      !process.env.EBAY_CLIENT_SECRET
+    ) {
+
+      console.log(
+        "Missing eBay environment variables"
+      );
+
+      return null;
+    }
+
+    const auth = Buffer.from(
+      process.env.EBAY_CLIENT_ID +
+      ":" +
+      process.env.EBAY_CLIENT_SECRET
+    ).toString("base64");
 
     const response = await fetch(
-      SCANNER_API,
+      "https://api.ebay.com/identity/v1/oauth2/token",
       {
-        method:"POST",
-        body:formData
+        method: "POST",
+
+        headers: {
+          Authorization:
+            `Basic ${auth}`,
+
+          "Content-Type":
+            "application/x-www-form-urlencoded"
+        },
+
+        body:
+          "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope"
       }
     );
 
-    if(!response.ok){
-
-      throw new Error(
-        "Server returned " + response.status
-      );
-    }
-
     const data = await response.json();
 
-    console.log("SCAN RESPONSE:", data);
+    if (!data.access_token) {
 
-    if(!data.success){
-
-      throw new Error(
-        data.error || "Card scan failed"
+      console.log(
+        "eBay token failed"
       );
+
+      return null;
     }
 
-    /* CARD NAME */
-    document.getElementById("demoCardName").innerText =
-      data.cardName ||
-      data.name ||
-      "Card Found";
+    ebayToken =
+      data.access_token;
 
-    /* SIGNAL */
-    document.getElementById("demoSignal").innerText =
-      data.signal ||
-      "READY";
+    tokenExpires =
+      Date.now() +
+      ((data.expires_in || 7200) - 60) * 1000;
 
-    /* AUTO PSA ROI */
-    if(data.avgSoldPrice){
+    return ebayToken;
 
-      document.getElementById("rawValue").value =
-        Math.round(data.avgSoldPrice);
+  } catch (error) {
 
-      calculatePSA();
-    }
-
-    /* AUTO SCROLL */
-    document
-      .getElementById("psaROISection")
-      .scrollIntoView({
-        behavior:"smooth"
-      });
-
-  }catch(error){
-
-    console.error("SCAN ERROR:", error);
-
-    document.getElementById("demoCardName").innerText =
-      "Scan Failed";
-
-    document.getElementById("demoSignal").innerText =
-      "ERROR";
-
-    alert(
-      "Scanner failed: " +
+    console.log(
+      "eBay token error:",
       error.message
     );
-  }
-}
 
-/* PSA CALC */
-function calculatePSA(){
-
-  var raw =
-    Number(
-      document.getElementById("rawValue").value || 0
-    );
-
-  var cost =
-    Number(
-      document.getElementById("gradingCost").value || 0
-    );
-
-  var psa9 =
-    Number(
-      document.getElementById("psa9Value").value || 0
-    );
-
-  var psa10 =
-    Number(
-      document.getElementById("psa10Value").value || 0
-    );
-
-  var totalCost = raw + cost;
-
-  var profit9 = psa9 - totalCost;
-
-  var profit10 = psa10 - totalCost;
-
-  document.getElementById("psa9Profit").innerText =
-    (profit9 >= 0 ? "$" : "-$")
-    + Math.abs(profit9).toFixed(0);
-
-  document.getElementById("psa10Profit").innerText =
-    (profit10 >= 0 ? "$" : "-$")
-    + Math.abs(profit10).toFixed(0);
-
-  var signal = "WAIT";
-
-  if(profit10 >= totalCost && profit9 >= 0){
-
-    signal = "GRADE";
-
-  }else if(profit10 > 0){
-
-    signal = "WATCH";
-
-  }else{
-
-    signal = "SELL RAW";
+    return null;
   }
 
-  document.getElementById("gradeSignal").innerText =
-    signal;
 }
 
-/* AUTO INIT */
-calculatePSA();
+/* =========================================
+   DEMO CARD DATABASE
+========================================= */
 
-</script>
+const demoCards = [
+
+  {
+    keywords:
+      ["ohtani", "shohei"],
+
+    cardName:
+      "Shohei Ohtani Rookie Card",
+
+    signal:
+      "GRADE",
+
+    avgSoldPrice:
+      180
+  },
+
+  {
+    keywords:
+      ["charizard"],
+
+    cardName:
+      "Charizard Base Set",
+
+    signal:
+      "HOT",
+
+    avgSoldPrice:
+      450
+  },
+
+  {
+    keywords:
+      ["judge", "aaron"],
+
+    cardName:
+      "Aaron Judge Rookie",
+
+    signal:
+      "WATCH",
+
+    avgSoldPrice:
+      120
+  },
+
+  {
+    keywords:
+      ["skenes"],
+
+    cardName:
+      "Paul Skenes Prospect",
+
+    signal:
+      "WATCH",
+
+    avgSoldPrice:
+      95
+  }
+
+];
+
+/* =========================================
+   SIMPLE CARD DETECTION
+========================================= */
+
+function detectDemoCard(filename = "") {
+
+  const lower =
+    filename.toLowerCase();
+
+  for (const card of demoCards) {
+
+    const matched =
+      card.keywords.some(keyword =>
+        lower.includes(keyword)
+      );
+
+    if (matched) {
+
+      return card;
+    }
+
+  }
+
+  return {
+    cardName:
+      "Sports Trading Card",
+
+    signal:
+      "SCAN READY",
+
+    avgSoldPrice:
+      75
+  };
+
+}
+
+/* =========================================
+   SCAN API
+========================================= */
+
+app.post(
+  "/api/scan-card",
+
+  upload.fields([
+    {
+      name: "front",
+      maxCount: 1
+    },
+
+    {
+      name: "back",
+      maxCount: 1
+    }
+  ]),
+
+  async (req, res) => {
+
+    try {
+
+      const front =
+        req.files?.front?.[0];
+
+      const back =
+        req.files?.back?.[0];
+
+      if (!front) {
+
+        return res.status(400).json({
+
+          success: false,
+
+          error:
+            "Front image required"
+
+        });
+
+      }
+
+      console.log(
+        "Front image:",
+        front.originalname
+      );
+
+      if (back) {
+
+        console.log(
+          "Back image:",
+          back.originalname
+        );
+
+      }
+
+      /* =========================================
+         MOCK DETECTION
+      ========================================= */
+
+      const detected =
+        detectDemoCard(
+          front.originalname
+        );
+
+      /* =========================================
+         OPTIONAL EBAY TOKEN CHECK
+      ========================================= */
+
+      await getEbayToken();
+
+      /* =========================================
+         RESPONSE
+      ========================================= */
+
+      return res.json({
+
+        success: true,
+
+        cardName:
+          detected.cardName,
+
+        signal:
+          detected.signal,
+
+        avgSoldPrice:
+          detected.avgSoldPrice,
+
+        timestamp:
+          Date.now()
+
+      });
+
+    } catch (error) {
+
+      console.error(
+        "SCAN ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+
+        success: false,
+
+        error:
+          "Scanner failed"
+
+      });
+
+    }
+
+  }
+);
+
+/* =========================================
+   404
+========================================= */
+
+app.use((req, res) => {
+
+  res.status(404).json({
+
+    success: false,
+
+    error:
+      "Endpoint not found"
+
+  });
+
+});
+
+/* =========================================
+   SERVER START
+========================================= */
+
+const PORT =
+  process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+
+  console.log(
+    `Server running on port ${PORT}`
+  );
+
+});
