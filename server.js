@@ -1,6 +1,6 @@
 /* ===============================
-   TRACK THE MARKET
-   AI SCANNER + EBAY PRICING BACKEND
+   CARDGAUGE / TRACK THE MARKET
+   AI SCANNER + EBAY CARD MARKET BACKEND
    server.js
 ================================ */
 
@@ -12,7 +12,7 @@ const fetch = require("node-fetch");
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 const upload = multer({
@@ -26,7 +26,7 @@ let ebayTokenExpires = 0;
 app.get("/", (req, res) => {
   res.json({
     success: true,
-    app: "Track The Market Scanner Backend",
+    app: "CardGauge / Track The Market Backend",
     status: "online"
   });
 });
@@ -55,6 +55,66 @@ function cleanJsonText(text) {
 function safeNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function average(nums) {
+  if (!nums.length) return 0;
+  return Math.round(nums.reduce((a, b) => a + b, 0) / nums.length);
+}
+
+function normalizeCardQuery(query) {
+  let q = String(query || "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!q) return "sports trading card";
+
+  const lower = q.toLowerCase();
+
+  const pokemonNames = [
+    "charizard","pikachu","umbreon","rayquaza","mewtwo","gengar",
+    "eevee","dragonite","lugia","blastoise","snorlax","mew",
+    "gyarados","lucario","greninja"
+  ];
+
+  if (pokemonNames.includes(lower)) {
+    q = `${q} Pokemon card`;
+  }
+
+  if (
+    lower.includes("pokemon") &&
+    !lower.includes("card") &&
+    !lower.includes("booster") &&
+    !lower.includes("box") &&
+    !lower.includes("sealed")
+  ) {
+    q += " card";
+  }
+
+  return q;
+}
+
+function isLikelyCardListing(title) {
+  const t = String(title || "").toLowerCase();
+
+  const positive = [
+    "card","cards","psa","bgs","cgc","sgc","rookie","rc",
+    "topps","bowman","panini","prizm","select","optic",
+    "pokemon","pokémon","holo","reverse holo","booster",
+    "hobby box","sealed","chrome","refractor","auto","autograph",
+    "patch","parallel","graded","slab"
+  ];
+
+  const negative = [
+    "poster","plush","figure","toy","shirt","t-shirt","costume",
+    "sticker only","keychain","funko","blanket","pillow","wallet",
+    "phone case","digital","code card only"
+  ];
+
+  const hasPositive = positive.some(w => t.includes(w));
+  const hasNegative = negative.some(w => t.includes(w));
+
+  return hasPositive && !hasNegative;
 }
 
 async function getEbayToken() {
@@ -97,22 +157,28 @@ async function getEbayToken() {
   return ebayToken;
 }
 
-async function getEbayMarketPrice(cardName) {
+async function getEbayCardMarket(query) {
   try {
     const token = await getEbayToken();
+    const cleanQuery = normalizeCardQuery(query);
 
-    if (!token || !cardName) {
+    if (!token || !cleanQuery) {
       return {
-        avgSoldPrice: 0,
-        priceSource: "No eBay token or card name",
+        query: cleanQuery,
+        avgPrice: 0,
+        lowPrice: 0,
+        highPrice: 0,
+        listingCount: 0,
+        image: "",
+        priceSource: "Missing eBay token or query",
         listings: []
       };
     }
 
     const url =
       "https://api.ebay.com/buy/browse/v1/item_summary/search?q=" +
-      encodeURIComponent(cardName) +
-      "&limit=10&sort=price";
+      encodeURIComponent(cleanQuery) +
+      "&limit=25";
 
     const response = await fetch(url, {
       headers: {
@@ -124,9 +190,12 @@ async function getEbayMarketPrice(cardName) {
 
     const data = await response.json();
 
-    const items = Array.isArray(data.itemSummaries) ? data.itemSummaries : [];
+    const rawItems = Array.isArray(data.itemSummaries)
+      ? data.itemSummaries
+      : [];
 
-    const listings = items
+    const listings = rawItems
+      .filter(item => isLikelyCardListing(item.title))
       .map(item => ({
         title: item.title || "",
         price: safeNumber(item.price && item.price.value, 0),
@@ -136,25 +205,31 @@ async function getEbayMarketPrice(cardName) {
       }))
       .filter(item => item.price > 0);
 
-    const prices = listings.map(item => item.price);
-
-    const avg =
-      prices.length > 0
-        ? Math.round(prices.reduce((a, b) => a + b, 0) / prices.length)
-        : 0;
+    const prices = listings.map(item => item.price).sort((a, b) => a - b);
 
     return {
-      avgSoldPrice: avg,
-      priceSource: prices.length
-        ? "eBay active listing average"
-        : "No eBay listings found",
+      query: cleanQuery,
+      avgPrice: average(prices),
+      lowPrice: prices.length ? Math.round(prices[0]) : 0,
+      highPrice: prices.length ? Math.round(prices[prices.length - 1]) : 0,
+      listingCount: listings.length,
+      image: listings.find(x => x.image)?.image || "",
+      priceSource: listings.length
+        ? "eBay active card listings"
+        : "No clean card listings found",
       listings
     };
+
   } catch (error) {
-    console.log("eBay price error:", error.message);
+    console.log("eBay card market error:", error.message);
 
     return {
-      avgSoldPrice: 0,
+      query,
+      avgPrice: 0,
+      lowPrice: 0,
+      highPrice: 0,
+      listingCount: 0,
+      image: "",
       priceSource: "eBay lookup failed",
       listings: []
     };
@@ -197,7 +272,7 @@ async function scanWithOpenAI(frontFile, backFile) {
       {
         role: "system",
         content:
-          "You identify sports cards, Pokemon cards, trading cards, slabs, and collectibles from images. Return ONLY valid JSON."
+          "You identify sports cards, Pokemon cards, trading cards, slabs, sealed wax, and collectibles from images. Return ONLY valid JSON. Do not guess exact market value."
       },
       {
         role: "user",
@@ -205,13 +280,13 @@ async function scanWithOpenAI(frontFile, backFile) {
           {
             type: "text",
             text:
-              "Identify this card. Return JSON only with: cardName, player, year, set, brand, cardNumber, sport, signal, confidence, summary. Signal must be one of GRADE, WATCH, SELL RAW, HOT, VERIFY."
+              "Identify this card. Return JSON only with: cardName, player, year, set, brand, cardNumber, sport, signal, confidence, summary. Signal must be one of GRADE, WATCH, SELL RAW, HOT, VERIFY. Do not include price estimates."
           },
           ...images
         ]
       }
     ],
-    temperature: 0.15,
+    temperature: 0.1,
     max_tokens: 700
   };
 
@@ -273,6 +348,48 @@ async function scanWithOpenAI(frontFile, backFile) {
   }
 }
 
+app.get("/api/card-market", async (req, res) => {
+  try {
+    const query = req.query.query || req.query.cardName;
+
+    if (!query) {
+      return res.status(400).json({
+        success: false,
+        error: "Query required"
+      });
+    }
+
+    const market = await getEbayCardMarket(query);
+
+    res.json({
+      success: true,
+      cardName: normalizeCardQuery(query),
+      avgPrice: market.avgPrice,
+      avgSoldPrice: market.avgPrice,
+      lowPrice: market.lowPrice,
+      highPrice: market.highPrice,
+      listingCount: market.listingCount,
+      soldCount: 0,
+      image: market.image,
+      priceSource: market.priceSource,
+      listings: market.listings,
+      soldCompsUrl:
+        "https://www.ebay.com/sch/i.html?_nkw=" +
+        encodeURIComponent(normalizeCardQuery(query)) +
+        "&LH_Sold=1&LH_Complete=1",
+      activeListingsUrl:
+        "https://www.ebay.com/sch/i.html?_nkw=" +
+        encodeURIComponent(normalizeCardQuery(query))
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: "Card market lookup failed",
+      details: error.message
+    });
+  }
+});
+
 app.get("/api/card-price", async (req, res) => {
   try {
     const cardName = req.query.cardName;
@@ -284,17 +401,27 @@ app.get("/api/card-price", async (req, res) => {
       });
     }
 
-    const ebay = await getEbayMarketPrice(cardName);
-    const avg = ebay.avgSoldPrice || 0;
+    const market = await getEbayCardMarket(cardName);
 
     res.json({
       success: true,
-      cardName,
-      avgSoldPrice: avg,
-      psa9Value: avg > 0 ? Math.round(avg * 1.35) : 0,
-      psa10Value: avg > 0 ? Math.round(avg * 2.25) : 0,
-      priceSource: ebay.priceSource,
-      listings: ebay.listings || []
+      cardName: normalizeCardQuery(cardName),
+      avgSoldPrice: market.avgPrice,
+      avgPrice: market.avgPrice,
+      lowPrice: market.lowPrice,
+      highPrice: market.highPrice,
+      listingCount: market.listingCount,
+      soldCount: 0,
+      image: market.image,
+      priceSource: market.priceSource,
+      listings: market.listings,
+      soldCompsUrl:
+        "https://www.ebay.com/sch/i.html?_nkw=" +
+        encodeURIComponent(normalizeCardQuery(cardName)) +
+        "&LH_Sold=1&LH_Complete=1",
+      activeListingsUrl:
+        "https://www.ebay.com/sch/i.html?_nkw=" +
+        encodeURIComponent(normalizeCardQuery(cardName))
     });
   } catch (error) {
     res.status(500).json({
@@ -330,8 +457,7 @@ app.post(
           ? ai.cardName
           : [ai.year, ai.brand, ai.player, ai.set].filter(Boolean).join(" ");
 
-      const ebay = await getEbayMarketPrice(cleanCardName);
-      const avgSoldPrice = ebay.avgSoldPrice || 0;
+      const market = await getEbayCardMarket(cleanCardName);
 
       return res.json({
         success: true,
@@ -344,12 +470,25 @@ app.post(
         sport: ai.sport || "Unknown",
         signal: ai.signal || "VERIFY",
         confidence: ai.confidence || "Medium",
-        summary: ai.summary || "AI scan complete. Verify with eBay comps.",
-        avgSoldPrice,
-        psa9Value: avgSoldPrice > 0 ? Math.round(avgSoldPrice * 1.35) : 0,
-        psa10Value: avgSoldPrice > 0 ? Math.round(avgSoldPrice * 2.25) : 0,
-        priceSource: ebay.priceSource,
-        listings: ebay.listings,
+        summary:
+          ai.summary ||
+          "AI scan complete. Verify exact version, condition, and comps.",
+        avgSoldPrice: market.avgPrice,
+        avgPrice: market.avgPrice,
+        lowPrice: market.lowPrice,
+        highPrice: market.highPrice,
+        listingCount: market.listingCount,
+        soldCount: 0,
+        image: market.image,
+        priceSource: market.priceSource,
+        listings: market.listings,
+        soldCompsUrl:
+          "https://www.ebay.com/sch/i.html?_nkw=" +
+          encodeURIComponent(normalizeCardQuery(cleanCardName)) +
+          "&LH_Sold=1&LH_Complete=1",
+        activeListingsUrl:
+          "https://www.ebay.com/sch/i.html?_nkw=" +
+          encodeURIComponent(normalizeCardQuery(cleanCardName)),
         timestamp: Date.now()
       });
     } catch (error) {
@@ -374,5 +513,5 @@ app.use((req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log(`Track The Market backend running on port ${PORT}`);
+  console.log(`CardGauge / Track The Market backend running on port ${PORT}`);
 });
