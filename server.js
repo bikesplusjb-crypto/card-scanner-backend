@@ -10,9 +10,9 @@ const multer = require("multer");
 const fetch = require("node-fetch");
 
 const app = express();
-const cors = require('cors');
-app.use(cors({ origin: '*' }));
-app.use(cors());
+
+// ── CORS — allow all origins (fixes Wix iframe fetch) ──────────
+app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -24,10 +24,6 @@ const upload = multer({
 // ── eBay Partner Network (EPN) Affiliate Config ────────────────
 const EPN_CAMPAIGN_ID = "5339149252";
 
-/**
- * Builds an eBay search URL with your affiliate tracking params.
- * Every link users click earns you commission on any purchase.
- */
 function ebayUrl(query, sold) {
   const base = "https://www.ebay.com/sch/i.html";
   const q = encodeURIComponent(normalizeCardQuery(query));
@@ -35,10 +31,6 @@ function ebayUrl(query, sold) {
   return `${base}?_nkw=${q}${soldParams}&mkcid=1&mkrid=711-53200-19255-0&siteid=0&campid=${EPN_CAMPAIGN_ID}&toolid=10001&mkevt=1`;
 }
 
-/**
- * Appends affiliate params to an individual eBay item URL
- * (the direct listing links returned from the Browse API)
- */
 function addAffiliateToUrl(url) {
   if (!url) return "";
   try {
@@ -51,7 +43,6 @@ function addAffiliateToUrl(url) {
     u.searchParams.set("mkevt",  "1");
     return u.toString();
   } catch (e) {
-    // fallback if URL parse fails
     const sep = url.includes("?") ? "&" : "?";
     return `${url}${sep}mkcid=1&mkrid=711-53200-19255-0&siteid=0&campid=${EPN_CAMPAIGN_ID}&toolid=10001&mkevt=1`;
   }
@@ -80,8 +71,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-// ── Affiliate Test ─────────────────────────────────────────────
-// Visit /api/affiliate-test on your Render URL to verify links
 app.get("/api/affiliate-test", (req, res) => {
   const q = "Charizard PSA 10 Base Set";
   res.json({
@@ -220,7 +209,6 @@ async function getEbayCardMarket(query) {
         price:    safeNumber(item.price && item.price.value, 0),
         currency: item.price && item.price.currency ? item.price.currency : "USD",
         image:    item.image && item.image.imageUrl ? item.image.imageUrl : "",
-        // ✅ AFFILIATE TRACKING on every individual listing URL
         url:      addAffiliateToUrl(item.itemWebUrl || "")
       }))
       .filter(item => item.price > 0);
@@ -320,7 +308,6 @@ app.get("/api/card-market", async (req, res) => {
       image:             market.image,
       priceSource:       market.priceSource,
       listings:          market.listings,
-      // ✅ AFFILIATE TRACKING on both search URLs
       soldCompsUrl:      ebayUrl(clean, true),
       activeListingsUrl: ebayUrl(clean, false)
     });
@@ -350,7 +337,6 @@ app.get("/api/card-price", async (req, res) => {
       image:             market.image,
       priceSource:       market.priceSource,
       listings:          market.listings,
-      // ✅ AFFILIATE TRACKING on both search URLs
       soldCompsUrl:      ebayUrl(clean, true),
       activeListingsUrl: ebayUrl(clean, false)
     });
@@ -401,7 +387,6 @@ app.post(
         image:             market.image,
         priceSource:       market.priceSource,
         listings:          market.listings,
-        // ✅ AFFILIATE TRACKING on both search URLs
         soldCompsUrl:      ebayUrl(clean, true),
         activeListingsUrl: ebayUrl(clean, false),
         timestamp:         Date.now()
