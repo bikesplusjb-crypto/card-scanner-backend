@@ -291,7 +291,10 @@ async function scanWithOpenAI(frontFile, backFile) {
 // Returns 20+ sub-$5 sports/Pokemon cards across multiple categories.
 // Cached 6 hours so we don't hammer eBay's API on every page load.
 
-let dollarBinCache = { data: null, expires: 0 };
+// Pool is pulled from eBay at most once per cache window; every request
+// returns a fresh, balanced random 24 drawn from the cached pool — so the
+// Refresh button shows different cards with NO extra eBay API calls.
+let dollarBinPool = { cats: [], fetchedAt: 0, expires: 0 };
 const DOLLAR_BIN_CACHE_HOURS = 6;
 
 const DOLLAR_BIN_QUERIES = [
@@ -365,6 +368,45 @@ function pickUpside(price) {
   return "LOW";
 }
 
+// Dollar Bin stays RAW-ONLY — exclude graded / slabbed listings.
+// Kept separate from isLikelyCardListing (the scanner still handles graded cards).
+function dbIsGraded(title) {
+  const t = " " + String(title || "").toLowerCase() + " ";
+  if (t.includes("graded") || t.includes("slab") || t.includes("encased")) return true;
+  return /\b(psa|bgs|bvg|cgc|sgc|hga|gma|csg)\b/.test(t);
+}
+
+// Build a balanced, freshly-shuffled set of up to 24 from the cached pool.
+// Each category is reshuffled and round-robined, so every refresh looks
+// different while still spreading across all categories.
+function buildDollarBinResponse(cats, fetchedAt) {
+  const queues = cats.map(arr => [...arr].sort(() => Math.random() - 0.5));
+  const mixed = [];
+  let progressed = true;
+  while (mixed.length < 24 && progressed) {
+    progressed = false;
+    for (const q of queues) {
+      if (q.length) {
+        mixed.push(q.shift());
+        progressed = true;
+        if (mixed.length >= 24) break;
+      }
+    }
+  }
+  const cards = mixed.map(card => ({
+    ...card,
+    upside: pickUpside(card.price),
+    reason: pickReason(card.category, card.title)
+  }));
+  return {
+    success:     true,
+    cards,
+    count:       cards.length,
+    refreshed:   new Date(fetchedAt).toISOString(),
+    nextRefresh: new Date(fetchedAt + DOLLAR_BIN_CACHE_HOURS * 3600 * 1000).toISOString()
+  };
+}
+
 async function fetchDollarBinCategory(category) {
   try {
     const token = await getEbayToken();
@@ -391,6 +433,7 @@ async function fetchDollarBinCategory(category) {
 
     return rawItems
       .filter(item => isLikelyCardListing(item.title))
+      .filter(item => !dbIsGraded(item.title))
       .filter(item => item.image && item.image.imageUrl)
       .map(item => ({
         title:    item.title || "",
@@ -409,46 +452,31 @@ async function fetchDollarBinCategory(category) {
 
 app.get("/api/dollar-bin", async (req, res) => {
   try {
-    // Serve cached if fresh
-    if (dollarBinCache.data && Date.now() < dollarBinCache.expires) {
-      return res.json(dollarBinCache.data);
+    // Pool still fresh → return a NEW random 24 from it (no extra eBay calls)
+    if (dollarBinPool.cats.length && Date.now() < dollarBinPool.expires) {
+      return res.json(buildDollarBinResponse(dollarBinPool.cats, dollarBinPool.fetchedAt));
     }
 
-    // Fetch all categories in parallel
+    // Pool stale → refetch every category from eBay and rebuild the pool
     const results = await Promise.all(
       DOLLAR_BIN_QUERIES.map(cat => fetchDollarBinCategory(cat))
     );
 
-    // Take up to 4 from each category for variety
-    const picks = [];
-    results.forEach(items => {
-      picks.push(...items.slice(0, 4));
-    });
+    // Keep up to 20 per category in the pool for lots of refresh variety
+    const cats = results.map(items => items.slice(0, 20)).filter(arr => arr.length);
 
-    // Shuffle and limit to 24
-    const shuffled = picks
-      .sort(() => Math.random() - 0.5)
-      .slice(0, 24)
-      .map((card) => ({
-        ...card,
-        upside: pickUpside(card.price),
-        reason: pickReason(card.category, card.title)
-      }));
+    if (!cats.length) {
+      return res.status(503).json({ success: false, error: "No cards available right now", cards: [] });
+    }
 
-    const responseData = {
-      success:     true,
-      cards:       shuffled,
-      count:       shuffled.length,
-      refreshed:   new Date().toISOString(),
-      nextRefresh: new Date(Date.now() + DOLLAR_BIN_CACHE_HOURS * 3600 * 1000).toISOString()
+    const now = Date.now();
+    dollarBinPool = {
+      cats,
+      fetchedAt: now,
+      expires:   now + DOLLAR_BIN_CACHE_HOURS * 3600 * 1000
     };
 
-    dollarBinCache = {
-      data:    responseData,
-      expires: Date.now() + DOLLAR_BIN_CACHE_HOURS * 3600 * 1000
-    };
-
-    res.json(responseData);
+    res.json(buildDollarBinResponse(cats, now));
   } catch (error) {
     console.error("Dollar bin error:", error);
     res.status(500).json({
