@@ -287,6 +287,139 @@ async function scanWithOpenAI(frontFile, backFile) {
   }
 }
 
+// ── /api/dollar-bin ───────────────────────────────────────────
+// Returns 20+ sub-$5 sports/Pokemon cards across multiple categories.
+// Cached 6 hours so we don't hammer eBay's API on every page load.
+
+let dollarBinCache = { data: null, expires: 0 };
+const DOLLAR_BIN_CACHE_HOURS = 6;
+
+const DOLLAR_BIN_QUERIES = [
+  { tag: "POKEMON",     query: "Pokemon card holo rare",                emoji: "⚡" },
+  { tag: "NBA ROOKIES", query: "NBA rookie card Prizm",                 emoji: "🏀" },
+  { tag: "NFL ROOKIES", query: "NFL rookie card Prizm Panini",          emoji: "🏈" },
+  { tag: "MLB ROOKIES", query: "MLB rookie card Topps Chrome",          emoji: "⚾" },
+  { tag: "VINTAGE",     query: "vintage baseball card 1980s",           emoji: "📜" },
+  { tag: "REFRACTORS",  query: "Topps Chrome refractor rookie",         emoji: "✨" },
+];
+
+const REASON_TEMPLATES = [
+  "Rookie potential — could pop",
+  "Cheap entry to a hot set",
+  "Underpriced parallel",
+  "PSA-able candidate",
+  "Cheaper variant of a hot player",
+  "Vintage upside — long hold",
+  "Set finisher — collectors hunt these",
+  "Pre-rookie year sleeper",
+  "Trending player, low price",
+  "Hidden gem in low-cost wax",
+];
+
+function pickReason(index) {
+  return REASON_TEMPLATES[Math.abs(index) % REASON_TEMPLATES.length];
+}
+
+function pickUpside(price) {
+  if (price < 2)   return "WILD";
+  if (price < 3.5) return "MID";
+  return "LOW";
+}
+
+async function fetchDollarBinCategory(category) {
+  try {
+    const token = await getEbayToken();
+    if (!token) return [];
+
+    const params = new URLSearchParams({
+      q: category.query,
+      filter: "price:[..5],priceCurrency:USD",
+      limit: "30",
+      sort: "newlyListed"
+    });
+    const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?${params.toString()}`;
+
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+        "Content-Type": "application/json"
+      }
+    });
+
+    const data = await response.json();
+    const rawItems = Array.isArray(data.itemSummaries) ? data.itemSummaries : [];
+
+    return rawItems
+      .filter(item => isLikelyCardListing(item.title))
+      .filter(item => item.image && item.image.imageUrl)
+      .map(item => ({
+        title:    item.title || "",
+        price:    safeNumber(item.price && item.price.value, 0),
+        image:    item.image.imageUrl,
+        url:      addAffiliateToUrl(item.itemWebUrl || ""),
+        category: category.tag,
+        emoji:    category.emoji
+      }))
+      .filter(item => item.price > 0 && item.price <= 5);
+  } catch (error) {
+    console.log(`Dollar bin fetch error for ${category.tag}:`, error.message);
+    return [];
+  }
+}
+
+app.get("/api/dollar-bin", async (req, res) => {
+  try {
+    // Serve cached if fresh
+    if (dollarBinCache.data && Date.now() < dollarBinCache.expires) {
+      return res.json(dollarBinCache.data);
+    }
+
+    // Fetch all categories in parallel
+    const results = await Promise.all(
+      DOLLAR_BIN_QUERIES.map(cat => fetchDollarBinCategory(cat))
+    );
+
+    // Take up to 4 from each category for variety
+    const picks = [];
+    results.forEach(items => {
+      picks.push(...items.slice(0, 4));
+    });
+
+    // Shuffle and limit to 24
+    const shuffled = picks
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 24)
+      .map((card, i) => ({
+        ...card,
+        upside: pickUpside(card.price),
+        reason: pickReason(i + Math.floor(Date.now() / 86400000))
+      }));
+
+    const responseData = {
+      success:     true,
+      cards:       shuffled,
+      count:       shuffled.length,
+      refreshed:   new Date().toISOString(),
+      nextRefresh: new Date(Date.now() + DOLLAR_BIN_CACHE_HOURS * 3600 * 1000).toISOString()
+    };
+
+    dollarBinCache = {
+      data:    responseData,
+      expires: Date.now() + DOLLAR_BIN_CACHE_HOURS * 3600 * 1000
+    };
+
+    res.json(responseData);
+  } catch (error) {
+    console.error("Dollar bin error:", error);
+    res.status(500).json({
+      success: false,
+      error:   "Dollar bin lookup failed",
+      details: error.message
+    });
+  }
+});
+
 // ── /api/card-market ───────────────────────────────────────────
 app.get("/api/card-market", async (req, res) => {
   try {
