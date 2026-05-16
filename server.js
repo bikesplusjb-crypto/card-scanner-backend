@@ -303,21 +303,60 @@ const DOLLAR_BIN_QUERIES = [
   { tag: "REFRACTORS",  query: "Topps Chrome refractor rookie",         emoji: "✨" },
 ];
 
-const REASON_TEMPLATES = [
-  "Rookie potential — could pop",
-  "Cheap entry to a hot set",
-  "Underpriced parallel",
-  "PSA-able candidate",
-  "Cheaper variant of a hot player",
-  "Vintage upside — long hold",
-  "Set finisher — collectors hunt these",
-  "Pre-rookie year sleeper",
-  "Trending player, low price",
-  "Hidden gem in low-cost wax",
+// Category-matched reasons — coherent with the card, not random.
+const REASONS_BY_CATEGORY = {
+  "POKEMON": [
+    "Holo rare under $5 — cheap PSA candidate",
+    "Low-cost way into a popular set",
+    "Collectors hunt these to finish a set",
+    "Cheap now — older sets dry up fast"
+  ],
+  "NBA ROOKIES": [
+    "Rookie card — real upside if he breaks out",
+    "Cheap rookie, low risk, high ceiling",
+    "Prospect card before the hype hits",
+    "Rookie-year card at a throwaway price"
+  ],
+  "NFL ROOKIES": [
+    "Rookie card — upside if he produces",
+    "Cheap rookie, low downside",
+    "Get in before a breakout season",
+    "Rookie-year card priced like a common"
+  ],
+  "MLB ROOKIES": [
+    "Rookie card — prospect upside",
+    "Cheap now, before he fully arrives",
+    "Low-cost shot on a future star",
+    "Rookie-year card at a bargain"
+  ],
+  "VINTAGE": [
+    "1980s vintage — clean copies appreciate",
+    "Old stock, low price — long hold",
+    "Vintage — condition can surprise you",
+    "Pre-1990 card with collector demand"
+  ],
+  "REFRACTORS": [
+    "Refractor parallel — scarcer than base",
+    "Chrome shine collectors pay up for",
+    "Parallel under $5 — undervalued",
+    "Refractor RC — cheap parallel of a prospect"
+  ]
+};
+
+const REASONS_FALLBACK = [
+  "Low-cost card with collector demand",
+  "Cheap entry — flip or hold",
+  "Bargain-bin find with upside",
+  "Underpriced for the category"
 ];
 
-function pickReason(index) {
-  return REASON_TEMPLATES[Math.abs(index) % REASON_TEMPLATES.length];
+// Deterministic by title, so the same card always shows the same reason.
+function pickReason(category, title) {
+  const pool = REASONS_BY_CATEGORY[category] || REASONS_FALLBACK;
+  const s = String(title || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return pool[Math.abs(h) % pool.length];
 }
 
 function pickUpside(price) {
@@ -390,10 +429,10 @@ app.get("/api/dollar-bin", async (req, res) => {
     const shuffled = picks
       .sort(() => Math.random() - 0.5)
       .slice(0, 24)
-      .map((card, i) => ({
+      .map((card) => ({
         ...card,
         upside: pickUpside(card.price),
-        reason: pickReason(i + Math.floor(Date.now() / 86400000))
+        reason: pickReason(card.category, card.title)
       }));
 
     const responseData = {
