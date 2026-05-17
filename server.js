@@ -598,6 +598,166 @@ app.post(
   }
 );
 
+// ── /api/vs-market ─────────────────────────────────────────────
+// "Cards vs. Wall Street" communal scoreboard.
+// Forward-looking: each matchup is locked on a start date with a
+// fixed start price for the card and the stock. % change since the
+// start is what's scored. NO database — start prices live as
+// constants below (set once, in Stage 2). Current prices are fetched
+// live every request and compared to the locked anchors.
+//
+// STAGE 1 (capture): stockStart / cardStart are null below, so the
+// endpoint runs in CAPTURE mode and just reports TODAY's live prices.
+// Copy that response back and the anchors get baked in (Stage 2).
+// Once anchors are real numbers, it auto-switches to SCOREBOARD mode.
+
+const VS_MARKET_DOLLARS    = 100;
+const VS_MARKET_START_DATE = null; // Stage 2 sets this, e.g. "2026-05-17"
+const VS_MARKET_CACHE_MIN  = 15;   // cache 15 min — protects API limits, keeps it fast
+
+const VS_MARKET_MATCHUPS = [
+  {
+    id: "aapl-ohtani",
+    stockSymbol: "AAPL", stockLabel: "Apple",
+    cardLabel: "2018 Topps Update Shohei Ohtani RC",
+    cardQuery: "2018 Topps Update Shohei Ohtani rookie RC US285",
+    stockStart: null, cardStart: null
+  },
+  {
+    id: "nke-luka",
+    stockSymbol: "NKE", stockLabel: "Nike",
+    cardLabel: "2018-19 Panini Prizm Luka Doncic RC",
+    cardQuery: "2018-19 Panini Prizm Luka Doncic rookie RC 280",
+    stockStart: null, cardStart: null
+  },
+  {
+    id: "dis-charizard",
+    stockSymbol: "DIS", stockLabel: "Disney",
+    cardLabel: "Pokemon Charizard VMAX Champion's Path",
+    cardQuery: "Pokemon Charizard VMAX Champions Path 074/073",
+    stockStart: null, cardStart: null
+  },
+  {
+    id: "nvda-mahomes",
+    stockSymbol: "NVDA", stockLabel: "Nvidia",
+    cardLabel: "2017 Panini Prizm Patrick Mahomes RC",
+    cardQuery: "2017 Panini Prizm Patrick Mahomes rookie RC 269",
+    stockStart: null, cardStart: null
+  },
+  {
+    id: "spy-griffey",
+    stockSymbol: "SPY", stockLabel: "S&P 500 (SPY)",
+    cardLabel: "1989 Upper Deck Ken Griffey Jr RC",
+    cardQuery: "1989 Upper Deck Ken Griffey Jr rookie RC 1",
+    stockStart: null, cardStart: null
+  }
+];
+
+let vsMarketCache = { data: null, expires: 0 };
+
+async function getStockQuote(symbol) {
+  try {
+    const key = process.env.FINNHUB_API_KEY;
+    if (!key) return { symbol, price: 0, ok: false, note: "Missing FINNHUB_API_KEY in Render" };
+    const r = await fetch(
+      `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${key}`
+    );
+    const d = await r.json();
+    const price = safeNumber(d && d.c, 0);
+    if (!price) return { symbol, price: 0, ok: false, note: "No price (check symbol / key / rate limit)" };
+    return { symbol, price, ok: true, note: "" };
+  } catch (e) {
+    return { symbol, price: 0, ok: false, note: e.message };
+  }
+}
+
+app.get("/api/vs-market", async (req, res) => {
+  try {
+    if (vsMarketCache.data && Date.now() < vsMarketCache.expires) {
+      return res.json(vsMarketCache.data);
+    }
+
+    const rows = await Promise.all(
+      VS_MARKET_MATCHUPS.map(async (m) => {
+        const [stockQ, cardM] = await Promise.all([
+          getStockQuote(m.stockSymbol),
+          getEbayCardMarket(m.cardQuery)
+        ]);
+        const stockNow = stockQ.price;
+        const cardNow  = safeNumber(cardM.avgPrice, 0);
+
+        const row = {
+          id: m.id,
+          stock: {
+            symbol: m.stockSymbol, label: m.stockLabel,
+            priceNow: stockNow, ok: stockQ.ok, note: stockQ.note || ""
+          },
+          card: {
+            label: m.cardLabel, query: cardM.query,
+            priceNow: cardNow, listings: cardM.listingCount, image: cardM.image
+          }
+        };
+
+        if (m.stockStart && m.cardStart) {
+          const stockPct = stockNow ? +(((stockNow / m.stockStart) - 1) * 100).toFixed(1) : 0;
+          const cardPct  = cardNow  ? +(((cardNow  / m.cardStart ) - 1) * 100).toFixed(1) : 0;
+          row.stock.start = m.stockStart;
+          row.card.start  = m.cardStart;
+          row.stock.pct   = stockPct;
+          row.card.pct    = cardPct;
+          row.stock.value = +(VS_MARKET_DOLLARS * (stockNow / m.stockStart)).toFixed(2);
+          row.card.value  = +(VS_MARKET_DOLLARS * (cardNow  / m.cardStart )).toFixed(2);
+          row.leader = cardPct > stockPct ? "card" : stockPct > cardPct ? "stock" : "tie";
+        }
+        return row;
+      })
+    );
+
+    const anchored = VS_MARKET_MATCHUPS.every(m => m.stockStart && m.cardStart);
+    let payload;
+
+    if (anchored) {
+      let cardWins = 0, stockWins = 0;
+      rows.forEach(r => {
+        if (r.leader === "card") cardWins++;
+        else if (r.leader === "stock") stockWins++;
+      });
+      payload = {
+        success: true,
+        mode: "SCOREBOARD",
+        dollars: VS_MARKET_DOLLARS,
+        startDate: VS_MARKET_START_DATE,
+        tally: {
+          cardWins, stockWins,
+          leader: cardWins > stockWins ? "Cards"
+                : stockWins > cardWins ? "Wall Street" : "Tied"
+        },
+        matchups: rows,
+        updated: new Date().toISOString()
+      };
+    } else {
+      payload = {
+        success: true,
+        mode: "CAPTURE",
+        note: "Anchors not set yet. These are today's live prices. Copy this WHOLE response back to lock the scoreboard.",
+        captureBlock: rows.map(r => ({
+          id: r.id,
+          stockStart: r.stock.priceNow,
+          cardStart:  r.card.priceNow
+        })),
+        matchups: rows,
+        updated: new Date().toISOString()
+      };
+    }
+
+    vsMarketCache = { data: payload, expires: Date.now() + VS_MARKET_CACHE_MIN * 60 * 1000 };
+    res.json(payload);
+  } catch (error) {
+    console.error("vs-market error:", error);
+    res.status(500).json({ success: false, error: "vs-market failed", details: error.message });
+  }
+});
+
 app.use((req, res) => {
   res.status(404).json({ success: false, error: "Endpoint not found" });
 });
