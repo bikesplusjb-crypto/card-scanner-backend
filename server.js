@@ -612,7 +612,7 @@ app.post(
 // Once anchors are real numbers, it auto-switches to SCOREBOARD mode.
 
 const VS_MARKET_DOLLARS    = 100;
-const VS_MARKET_START_DATE = null; // Stage 2 sets this, e.g. "2026-05-17"
+const VS_MARKET_START_DATE = "2026-05-17"; // anchors locked this date
 const VS_MARKET_CACHE_MIN  = 15;   // cache 15 min — protects API limits, keeps it fast
 
 const VS_MARKET_MATCHUPS = [
@@ -621,35 +621,35 @@ const VS_MARKET_MATCHUPS = [
     stockSymbol: "AAPL", stockLabel: "Apple",
     cardLabel: "2018 Topps Update Shohei Ohtani RC",
     cardQuery: "2018 Topps Update Shohei Ohtani rookie RC US285",
-    stockStart: null, cardStart: null
+    stockStart: 300.23, cardStart: 565
   },
   {
     id: "nke-luka",
     stockSymbol: "NKE", stockLabel: "Nike",
     cardLabel: "2018-19 Panini Prizm Luka Doncic RC",
     cardQuery: "2018-19 Panini Prizm Luka Doncic rookie RC 280",
-    stockStart: null, cardStart: null
+    stockStart: 41.88, cardStart: 367
   },
   {
     id: "dis-charizard",
     stockSymbol: "DIS", stockLabel: "Disney",
     cardLabel: "Pokemon Charizard VMAX Champion's Path",
     cardQuery: "Pokemon Charizard VMAX Champions Path 074/073",
-    stockStart: null, cardStart: null
+    stockStart: 102.72, cardStart: 156
   },
   {
     id: "nvda-mahomes",
     stockSymbol: "NVDA", stockLabel: "Nvidia",
     cardLabel: "2017 Panini Prizm Patrick Mahomes RC",
     cardQuery: "2017 Panini Prizm Patrick Mahomes rookie RC 269",
-    stockStart: null, cardStart: null
+    stockStart: 225.32, cardStart: 2579
   },
   {
     id: "spy-griffey",
     stockSymbol: "SPY", stockLabel: "S&P 500 (SPY)",
     cardLabel: "1989 Upper Deck Ken Griffey Jr RC",
     cardQuery: "1989 Upper Deck Ken Griffey Jr rookie RC 1",
-    stockStart: null, cardStart: null
+    stockStart: 739.17, cardStart: 447
   }
 ];
 
